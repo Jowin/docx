@@ -1,0 +1,35 @@
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: designtime-postgres
+    environment:
+      POSTGRES_USER: designtime
+      POSTGRES_PASSWORD: designtime
+      POSTGRES_DB: designtime
+    ports:
+      - "5432:5432"
+    volumes:
+      - designtime-pgdata:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U designtime -d designtime"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
+  api:
+    build: .
+    container_name: designtime-api
+    depends_on:
+      postgres:
+        condition: service_healthy
+    environment:
+      DATABASE_URL: postgresql+psycopg2://designtime:designtime@postgres:5432/designtime
+    ports:
+      - "8000:8000"
+    # Migrations run on start so a fresh clone comes up with one command.
+    command: >
+      sh -c "alembic upgrade head &&
+             uvicorn dataextractor_designtime.main:app --host 0.0.0.0 --port 8000"
+
+volumes:
+  designtime-pgdata:

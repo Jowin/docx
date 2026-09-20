@@ -1,0 +1,164 @@
+"""Generate a deterministic sample corpus: invoices with CSV and XLSX attachments.
+
+    python samples/generate_corpus.py out/acme-invoices
+
+Writes samples/, labels.jsonl and corpus.json in the layout PRD 2 describes,
+plus corpus.request.json — a ready-made request body for the profiler and the
+authoring run, so the API can be exercised with curl straight away.
+"""
+
+from __future__ import annotations
+
+import csv
+import json
+import sys
+from pathlib import Path
+
+VENDORS = [
+    "Acme Corp", "Northwind Trading", "Globex Industries", "Initech Systems",
+    "Umbrella Supplies", "Soylent Foods", "Vandelay Imports", "Stark Components",
+    "Wayne Logistics", "Cyberdyne Metals",
+]
+INVOICE_COUNT = 30
+QUOTE_COUNT = 10
+
+HEADERS = ["Vendor Name", "Amount Due", "Payment Due", "Invoice No"]
+COL_INDEX = {"vendor": 0, "amount": 1, "due_date": 2, "invoice_number": 3}
+SHEET_NAME = "Summary"
+
+
+def _csv_locator(filename: str, col: int) -> str:
+    # Mirrors tabular.Sheet.locator for CSV: first data row is row 2.
+    return f"attachment:{filename}#row2col{col + 1}"
+
+
+def _xlsx_locator(filename: str, col: int) -> str:
+    # Mirrors tabular.Sheet.locator for XLSX with headers on row 1.
+    letter = chr(ord("A") + col)
+    return f"attachment:{filename}!{SHEET_NAME}!{letter}2"
+
+
+def _invoice(i: int) -> dict:
+    vendor = VENDORS[i % len(VENDORS)]
+    amount = round(1000 + i * 137.25, 2)
+    due = f"2026-{(i % 12) + 1:02d}-{(i % 27) + 1:02d}"
+    number = f"INV-{20000 + i}"
+    return {"vendor": vendor, "amount": amount, "due_date": due, "invoice_number": number}
+
+
+def _write_csv(path: Path, fields: dict) -> None:
+    with path.open("w", newline="", encoding="utf-8") as fh:
+        w = csv.writer(fh)
+        w.writerow(HEADERS)
+        w.writerow([fields["vendor"], f"{fields['amount']:.2f}", fields["due_date"], fields["invoice_number"]])
+
+
+def _write_xlsx(path: Path, fields: dict) -> None:
+    from openpyxl import Workbook
+
+    wb = Workbook()
+    ws = wb.active
+    ws.title = SHEET_NAME
+    ws.append(HEADERS)
+    ws.append([fields["vendor"], fields["amount"], fields["due_date"], fields["invoice_number"]])
+    wb.save(path)
+
+
+def build(root: Path) -> dict:
+    root = Path(root)
+    (root / "samples").mkdir(parents=True, exist_ok=True)
+
+    samples: list[dict] = []
+    labels: list[dict] = []
+
+    for i in range(INVOICE_COUNT):
+        sid = f"inv_{i:04d}"
+        fields = _invoice(i)
+        sdir = root / "samples" / sid
+        (sdir / "attachments").mkdir(parents=True, exist_ok=True)
+
+        use_csv = i % 2 == 0
+        filename = f"{sid}.csv" if use_csv else f"{sid}.xlsx"
+        apath = sdir / "attachments" / filename
+        (_write_csv if use_csv else _write_xlsx)(apath, fields)
+
+        body = (
+            f"Hello,\n\n"
+            f"Please find the invoice attached for this period.\n\n"
+            f"Vendor: {fields['vendor']}\n"
+            f"Invoice Number: {fields['invoice_number']}\n"
+            f"Amount: {fields['amount']:.2f}\n"
+            f"Due Date: {fields['due_date']}\n\n"
+            f"Remit to the account on file. Payment terms are net 30.\n"
+        )
+        samples.append(
+            {
+                "sample_id": sid,
+                "subject": f"Invoice {fields['invoice_number']} from {fields['vendor']}",
+                "body": body,
+                "attachments": [
+                    {
+                        "filename": filename,
+                        "path": str(Path("samples") / sid / "attachments" / filename),
+                    }
+                ],
+            }
+        )
+
+        locator = (_csv_locator if use_csv else _xlsx_locator)(filename, COL_INDEX["amount"])
+        labels.append(
+            {
+                "sample_id": sid,
+                "email_type": "invoice",
+                "in_scope": True,
+                "fields": fields,
+                "field_sources": {"amount": locator},
+                "labelled_by": "sme@acme.example",
+                "labelled_at": "2026-09-03",
+            }
+        )
+
+    # Out-of-scope quotations: the negative signals detection rules mine (DT-11).
+    for i in range(QUOTE_COUNT):
+        sid = f"quo_{i:04d}"
+        vendor = VENDORS[i % len(VENDORS)]
+        samples.append(
+            {
+                "sample_id": sid,
+                "subject": f"Quotation Q-{500 + i} from {vendor}",
+                "body": (
+                    "Hi,\n\nThanks for your enquiry. Our quotation is below; it is "
+                    "valid for thirty days and is not a request for payment.\n\n"
+                    f"Quotation reference: Q-{500 + i}\nEstimate: indicative only\n"
+                ),
+                "attachments": [],
+            }
+        )
+        labels.append({"sample_id": sid, "email_type": "quotation", "in_scope": False, "fields": {}})
+
+    corpus = {
+        "meta": {
+            "corpus_id": "acme/corpus/2026-09-01",
+            "client_id": "acme",
+            "created_at": "2026-09-01",
+            "provenance": "synthetic; generated by samples/generate_corpus.py",
+            "consent_note": "no real client data",
+        },
+        "samples": samples,
+        "labels": labels,
+    }
+
+    (root / "corpus.json").write_text(json.dumps(corpus["meta"], indent=2), encoding="utf-8")
+    with (root / "labels.jsonl").open("w", encoding="utf-8") as fh:
+        for label in labels:
+            fh.write(json.dumps(label) + "\n")
+    (root / "corpus.request.json").write_text(
+        json.dumps({"corpus": corpus, "corpus_root": str(root)}, indent=2), encoding="utf-8"
+    )
+    return corpus
+
+
+if __name__ == "__main__":
+    target = Path(sys.argv[1] if len(sys.argv) > 1 else "samples/acme-invoices")
+    built = build(target)
+    print(f"wrote {len(built['samples'])} samples to {target}")
