@@ -13,6 +13,7 @@ from .errors import (
 from .models import (
     ActivationRow,
     ArtifactRow,
+    LearningRunRow,
     PackageRow,
     PackageState,
     PromotionRow,
@@ -27,6 +28,7 @@ __all__ = [
     "dispose_all",
     "EngineIncompatible",
     "GateFailed",
+    "LearningRunRow",
     "PackageCorrupt",
     "PackageNotFound",
     "PackageRow",

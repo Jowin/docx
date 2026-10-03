@@ -175,3 +175,43 @@ class ActivationRow(Base):
         UUIDType, ForeignKey("packages.id", ondelete="RESTRICT"), nullable=True
     )
     updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, nullable=False)
+
+
+class LearningRunRow(Base):
+    """One call of the pattern-learning loop: what was tried, what it scored, what it wrote.
+
+    Append-only. Rows whose outcome left the source passing double as the
+    regression set for later learning on the same client and use case.
+    """
+
+    __tablename__ = "learning_runs"
+    __table_args__ = (
+        Index("ix_learning_runs_pattern", "client_id", "usecase", "pattern_name"),
+    )
+
+    id: Mapped[str] = mapped_column(UUIDType, primary_key=True, default=_uuid)
+    client_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    usecase: Mapped[str] = mapped_column(String(128), nullable=False)
+    object_name: Mapped[str | None] = mapped_column(String(128), nullable=True)
+    pattern_name: Mapped[str] = mapped_column(String(64), nullable=False)
+    source: Mapped[str] = mapped_column(String(1024), nullable=False)
+    source_sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    ground_truth: Mapped[list[dict[str, Any]] | None] = mapped_column(JSONType, nullable=True)
+    reference_text: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+    base_version: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    #: The config version this run wrote, if it wrote one.
+    result_version: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    #: passed | learned | improved | failed | error
+    outcome: Mapped[str] = mapped_column(String(16), nullable=False)
+    passed_before: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    passed_after: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
+    verdict_before: Mapped[dict[str, Any] | None] = mapped_column(JSONType, nullable=True)
+    verdict_after: Mapped[dict[str, Any] | None] = mapped_column(JSONType, nullable=True)
+    attempts: Mapped[list[dict[str, Any]]] = mapped_column(JSONType, nullable=False, default=list)
+    skill_path: Mapped[str | None] = mapped_column(String(512), nullable=True)
+    skill_markdown: Mapped[str | None] = mapped_column(Text, nullable=True)
+    error: Mapped[dict[str, Any] | None] = mapped_column(JSONType, nullable=True)
+    generated_by: Mapped[str] = mapped_column(String(256), nullable=False)
+    requested_by: Mapped[str] = mapped_column(String(256), nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, nullable=False)

@@ -4,6 +4,8 @@ Extracts the fields a data dictionary defines from an email (`.eml` or Outlook `
 single CSV, Excel (`.xlsx`, `.xlsm`, `.xls`) or PDF file. Images are recorded and
 skipped. One FastAPI service, one self-contained Docker image. The pipeline is a
 LangGraph state graph, and every model call goes through one gateway function.
+Requests are validated by plain functions; no pydantic is imported by this code
+(FastAPI still installs it for itself).
 
 ```
 POST /extract   {"file_location": "invoice-email.eml"}                    -> the data
@@ -43,7 +45,7 @@ Then open http://localhost:8000/docs and try `POST /extract`.
 ```
 pip install -r requirements-dev.txt
 python -m tests.samples D:\data     # writes eight sample inputs
-pytest                              # 153 tests (service and reader tools)
+pytest                              # 169 tests (service and reader tools)
 ```
 
 ## Request
@@ -56,7 +58,9 @@ pytest                              # 153 tests (service and reader tools)
 | `version` | no | Config version, or `latest` |
 | `extended` | no | `true` adds confidence, sources, review reasons and metadata |
 
-Unknown request fields are rejected, so a typo like `extnded` fails loudly.
+Unknown request fields are rejected, so a typo like `extnded` fails loudly. A bad
+body is a 422 `invalid_request` whose `detail.errors` lists each problem, e.g.
+`{"loc": "extended", "msg": "must be a boolean"}`.
 
 ## Response
 
@@ -177,6 +181,30 @@ configs/
     skills/<name>.md                   one per skill, used in the order manifest.json lists them
 ```
 
+**Skill hints.** A skill may open with YAML front matter. Its `hints` are
+machine-readable and are folded into the data dictionary when the config loads,
+so every extractor uses them, the stub included; the model sees only the
+markdown body. Design-time writes these when it learns a document pattern
+(`kind: learned-pattern`), but a hand-written skill can carry them too.
+
+```markdown
+---
+name: hooli-remittance
+kind: learned-pattern
+hints:
+  fields:
+    invoice_number: {labels: ["Our Ref"]}           # labels become aliases
+    total_amount: {anchors: ["kindly remit"]}       # value follows this phrase, anywhere in a line
+    line_items:
+      items: {description: {labels: ["Service"]}}  # a line-item column header
+---
+## Skill: hooli-remittance pattern
+...
+```
+
+A hint for a field the dictionary lacks, an unknown hint key, or front matter
+that is not YAML makes the config fail to load (`config_invalid`).
+
 Each part the request leaves out is filled in like this:
 
 | Missing | Taken from |
@@ -211,6 +239,15 @@ run to review; `critical` fields that disagree across documents do too.
 `grounding: optional` lets a value be inferred rather than read, such as `USD`
 from a `$` sign. `manifest.json`'s `output.decimal_format` is `number` (default)
 or `string` (exact text such as `"12400.5"`).
+
+### Batch runs from the command line
+
+`python -m extractor_service.cli` reads `{"runs": [{"file_location", "client"?,
+"usecase"?, "version"?}], "include_evidence"?: bool}` on stdin and writes each run's
+extended output (plus its config, data dictionary, skills and, when asked, its
+evidence blocks) as JSON on stdout. Settings come from the same environment
+variables as the service. Design-time uses it to run this engine in isolation
+when it learns a pattern.
 
 ### Pipeline
 
@@ -305,6 +342,6 @@ when there are no review reasons and overall confidence reaches
 - **The `.msg` tests use synthetic files.** They are built to the published format, because no permissively licensed real samples exist. Run a few real Outlook exports through `/extract` before relying on it.
 - **Images are skipped.** This includes scanned PDFs with no text layer, which end in review.
 - **Zip unpacking is capped.** One level of nested zip is allowed. The defaults are 200 members, 200 MB unpacked and a 100:1 compression ratio, all adjustable in `manifest.json` under `intake`.
-- **The stub finds only what the aliases name.** Real documents need a model through the gateway.
+- **The stub finds only what the aliases and skill hints name.** Real documents need a model through the gateway; design-time's pattern learning adds hints for the layouts it has seen.
 - **No checkpointing yet.** The graph runs without a LangGraph checkpointer, so an interrupted run starts again rather than resuming. RT-40 needs a durable checkpointer, plus a serialisable run state.
 - **Evidence is paged.** By default the model sees 200 rows per sheet plus the last 10, and 10 PDF pages plus the last one. Larger files are truncated, and this is noted in `metadata.documents[].notes`.

@@ -9,9 +9,9 @@ from __future__ import annotations
 
 import re
 from collections import Counter
+from dataclasses import dataclass, field
 
-from pydantic import BaseModel, ConfigDict, Field
-
+from ..records import Record
 from ..config import get_settings
 from ..contracts.artifacts import DetectionRules, Keyword, Pattern, TypeDetectionRules
 from ..contracts.corpus import Corpus
@@ -30,32 +30,29 @@ _CANDIDATE_PATTERNS: list[tuple[str, str]] = [
 ]
 
 
-class RuleEvidence(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
+@dataclass(kw_only=True)
+class RuleEvidence(Record):
     rule: str
     kind: str
     support: int
-    sample_ids: list[str] = Field(default_factory=list)
+    sample_ids: list[str] = field(default_factory=list)
     kept: bool = True
     dropped_reason: str | None = None
 
 
-class DetectionRulesInput(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
+@dataclass(kw_only=True)
+class DetectionRulesInput(Record):
     corpus: Corpus
-    email_types: list[str] = Field(default_factory=list)
+    email_types: list[str] = field(default_factory=list)
     rule_support_min: int | None = None
-    exclude_sample_ids: list[str] = Field(default_factory=list)
+    exclude_sample_ids: list[str] = field(default_factory=list)
 
 
-class DetectionRulesOutput(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
+@dataclass(kw_only=True)
+class DetectionRulesOutput(Record):
     artifact: DetectionRules
-    evidence: list[RuleEvidence] = Field(default_factory=list)
-    dropped: list[RuleEvidence] = Field(default_factory=list)
+    evidence: list[RuleEvidence] = field(default_factory=list)
+    dropped: list[RuleEvidence] = field(default_factory=list)
 
 
 class DetectionRulesAgent(DesignAgent[DetectionRulesInput, DetectionRulesOutput]):

@@ -91,9 +91,35 @@ def test_errors_are_typed(client, body, status, code):
     assert r.status_code == status and r.json()["error"] == code
 
 
-def test_unknown_request_fields_rejected(client):
-    r = client.post("/extract", json={"file_location": "invoice.xlsx", "extnded": True})
-    assert r.status_code == 422
+@pytest.mark.parametrize("body,loc,msg", [
+    ({"file_location": "invoice.xlsx", "extnded": True}, "extnded", "unknown field"),
+    ({"client": "acme"}, "file_location", "required"),
+    ({"file_location": "invoice.xlsx", "extended": "yes"}, "extended", "must be a boolean"),
+    ({"file_location": 7}, "file_location", "must be a non-empty string"),
+])
+def test_request_is_validated(client, body, loc, msg):
+    r = client.post("/extract", json=body)
+    assert r.status_code == 422 and r.json()["error"] == "invalid_request"
+    assert {"loc": loc, "msg": msg} in r.json()["detail"]["errors"]
+
+
+def test_body_that_is_not_json(client):
+    r = client.post("/extract", content=b"{nope", headers={"content-type": "application/json"})
+    assert r.status_code == 422 and r.json()["error"] == "invalid_json"
+
+
+def test_request_schema_is_published(client):
+    body = client.get("/openapi.json").json()["paths"]["/extract"]["post"]["requestBody"]
+    schema = body["content"]["application/json"]["schema"]
+    assert schema["required"] == ["file_location"] and schema["additionalProperties"] is False
+
+
+def test_no_pydantic_in_service_code():
+    from pathlib import Path
+    root = Path(__file__).resolve().parents[1]
+    hits = [str(p.relative_to(root)) for d in ("extractor_service", "extractor_tools")
+            for p in (root / d).rglob("*.py") if "pydantic" in p.read_text(encoding="utf-8")]
+    assert hits == []
 
 
 def test_same_input_same_output_and_audit_id(client):

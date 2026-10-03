@@ -8,6 +8,8 @@ what the dictionary's aliases name:
   label, value to right   [Due Date] [2026-09-14]
   column header           CSV/Excel/PDF table column "Total Due" -> its value
   array fields            the table whose header matches 2+ item fields
+  anchor in a line        "... please pay $1,200.00 by ..." for a field whose
+                          learned anchors include "please pay"
 
 Records. The answer is a list of records keyed by the dictionary's
 ``record_key``:
@@ -95,8 +97,17 @@ class StubModel:
         cands = self._blank(scalars)
         header_locs = {b.locator for t in doc.tables for b in t.header}
         index = _row_index(doc)
+        anchored = [(a.casefold(), f) for f in scalars for a in f.anchors]
         for bi, block in enumerate(doc.blocks):
-            if block.locator in header_locs or block.locator in skip:
+            if block.locator in header_locs:
+                continue
+            # anchors are explicit learned phrases, so they also read inside key tables
+            for anchor, f in anchored:
+                raw = _after_anchor(f, block.text, anchor)
+                if raw is not None:
+                    self._add(cands, f, raw, doc, block,
+                              0.88 - (0.1 if doc.kind == "email_body" else 0.0), di, bi)
+            if block.locator in skip:
                 continue
             hit = _match_label(block.text, labels)
             if not hit:
@@ -340,6 +351,18 @@ def _match_label(text: str, labels) -> tuple[Field, str, bool] | None:
             has_sep = bool(m and m.group(1))
             return f, rest[m.end():] if m else rest, has_sep
     return None
+
+
+def _after_anchor(f: Field, text: str, anchor: str) -> Any:
+    """The value just after a learned anchor phrase, wherever it sits in the line."""
+    at = text.casefold().find(anchor)
+    if at < 0:
+        return None
+    end = at + len(anchor)
+    if end < len(text) and text[end].isalnum() and anchor[-1:].isalnum():
+        return None                              # "ref" must not anchor inside "reference"
+    rest = re.sub(r"^\s*(?:[:#=]|\s[\-–]\s)?\s*", "", text[end:])
+    return _value_from_text(f, rest) if rest else None
 
 
 def _value_from_text(f: Field, rest: str) -> Any:

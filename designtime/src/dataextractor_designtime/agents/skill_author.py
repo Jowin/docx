@@ -7,8 +7,9 @@ against the manifest contract: declared tools only, declared shapes only (CTR-09
 
 from __future__ import annotations
 
-from pydantic import BaseModel, ConfigDict, Field
+from dataclasses import dataclass, field
 
+from ..records import Record
 from ..contracts.artifacts import FieldSchema, SkillManifest
 from ..model.base import ModelRequest
 from .base import DesignAgent
@@ -34,47 +35,43 @@ DEFAULT_SKILLS: dict[str, dict[str, object]] = {
 }
 
 
-class OverrideDecision(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
+@dataclass(kw_only=True)
+class OverrideDecision(Record):
     skill_id: str
     override: bool
     #: DT-12: the default's error cases this override is meant to fix.
-    cited_failures: list[str] = Field(default_factory=list)
+    cited_failures: list[str] = field(default_factory=list)
     baseline_metric: float | None = None
     reason: str = ""
 
 
-class SkillAuthorInput(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
+@dataclass(kw_only=True)
+class SkillAuthorInput(Record):
     email_type: str
     field_schema: FieldSchema
     #: Skills to consider; defaults to the Phase 1 pair.
-    skill_ids: list[str] = Field(default_factory=lambda: ["field-mapping", "sheet-selection"])
+    skill_ids: list[str] = field(default_factory=lambda: ["field-mapping", "sheet-selection"])
     #: Per-skill baseline accuracy from a prior evaluation of the defaults.
-    baseline_metrics: dict[str, float] = Field(default_factory=dict)
+    baseline_metrics: dict[str, float] = field(default_factory=dict)
     #: Sample ids where the default skill got it wrong (DT-12 evidence).
-    failure_cases: dict[str, list[str]] = Field(default_factory=dict)
+    failure_cases: dict[str, list[str]] = field(default_factory=dict)
     #: Below this, the default is judged to underperform.
     override_threshold: float = 0.9
-    sheet_names: list[str] = Field(default_factory=list)
+    sheet_names: list[str] = field(default_factory=list)
 
 
-class AuthoredSkill(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
+@dataclass(kw_only=True)
+class AuthoredSkill(Record):
     manifest: SkillManifest
     body: str
     body_path: str
     manifest_path: str
 
 
-class SkillAuthorOutput(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    decisions: list[OverrideDecision] = Field(default_factory=list)
-    skills: list[AuthoredSkill] = Field(default_factory=list)
+@dataclass(kw_only=True)
+class SkillAuthorOutput(Record):
+    decisions: list[OverrideDecision] = field(default_factory=list)
+    skills: list[AuthoredSkill] = field(default_factory=list)
 
 
 class SkillAuthorAgent(DesignAgent[SkillAuthorInput, SkillAuthorOutput]):

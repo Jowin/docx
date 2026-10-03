@@ -7,15 +7,15 @@ by id; a correction creates a new corpus version, never an edit in place (DT-17)
 from __future__ import annotations
 
 import hashlib
+from dataclasses import dataclass, field
 from datetime import date
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field
+from ..records import Record
 
 
-class SampleAttachment(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
+@dataclass(kw_only=True)
+class SampleAttachment(Record):
     filename: str
     # Detected by content, not extension (mirrors RT-14 at design time).
     mime: str | None = None
@@ -25,33 +25,30 @@ class SampleAttachment(BaseModel):
     expected_unreadable: bool = False
 
 
-class Label(BaseModel):
+@dataclass(kw_only=True)
+class Label(Record):
     """One ground-truth record per sample (DT-19)."""
-
-    model_config = ConfigDict(extra="forbid")
 
     sample_id: str
     email_type: str
     in_scope: bool = True
-    fields: dict[str, Any] = Field(default_factory=dict)
+    fields: dict[str, Any] = field(default_factory=dict)
     # Where the value came from, when it came from an attachment (DT-19).
-    field_sources: dict[str, str] = Field(default_factory=dict)
+    field_sources: dict[str, str] = field(default_factory=dict)
     labelled_by: str | None = None
     labelled_at: date | None = None
 
 
-class Sample(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
+@dataclass(kw_only=True)
+class Sample(Record):
     sample_id: str
     subject: str = ""
     body: str = ""
-    attachments: list[SampleAttachment] = Field(default_factory=list)
+    attachments: list[SampleAttachment] = field(default_factory=list)
 
 
-class CorpusMeta(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
+@dataclass(kw_only=True)
+class CorpusMeta(Record):
     corpus_id: str
     client_id: str
     created_at: date | None = None
@@ -59,12 +56,11 @@ class CorpusMeta(BaseModel):
     consent_note: str = ""
 
 
-class Corpus(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
+@dataclass(kw_only=True)
+class Corpus(Record):
     meta: CorpusMeta
-    samples: list[Sample] = Field(default_factory=list)
-    labels: list[Label] = Field(default_factory=list)
+    samples: list[Sample] = field(default_factory=list)
+    labels: list[Label] = field(default_factory=list)
 
     def label_index(self) -> dict[str, Label]:
         return {label.sample_id: label for label in self.labels}

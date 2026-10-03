@@ -13,6 +13,8 @@ EXPECTED_AGENT_ROUTES = {
     "threshold-tuner",
     "evaluation",
     "packager",
+    "extraction-judge",
+    "pattern-skill-writer",
 }
 
 

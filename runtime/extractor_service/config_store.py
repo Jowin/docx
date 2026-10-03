@@ -8,6 +8,23 @@
         prompts/system.md                 the system prompt
         skills/<name>.md                  one file per skill, used in manifest order
 
+A skill is markdown for the model. It may open with a YAML front matter block
+whose ``hints`` are machine-readable (labels and anchors per field, see
+schema.apply_hints); design-time writes these when it learns a pattern, and
+the hints are folded into the data dictionary so every extractor, the
+deterministic stub included, uses them. The model sees the body only.
+
+    ---
+    name: acme-remittance
+    kind: learned-pattern
+    hints:
+      fields:
+        invoice_number: {labels: ["our ref"]}
+        total_amount: {anchors: ["please pay"]}
+    ---
+    ## Skill: acme remittance advice
+    ...
+
 How a request picks its folder (each part the request leaves out):
   client   -> the default client
   usecase  -> the default use case when the client is the default client,
@@ -25,12 +42,14 @@ import hashlib
 import json
 import re
 import threading
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
+import yaml
+
 from .errors import ConfigError
-from .schema import DataDictionary, load_dictionary
+from .schema import DataDictionary, apply_hints, load_dictionary
 
 _SEGMENT = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 _SEMVER = re.compile(r"^(\d+)\.(\d+)\.(\d+)$")
@@ -44,7 +63,29 @@ DEFAULT_INTAKE = {"max_zip_members": 200, "max_zip_uncompressed_mb": 200,
 @dataclass(frozen=True)
 class Skill:
     name: str
-    body: str
+    body: str                                   # markdown after any front matter
+    meta: dict[str, Any] = field(default_factory=dict)
+
+    @property
+    def hints(self) -> dict[str, Any]:
+        return self.meta.get("hints") or {}
+
+
+_FRONT = re.compile(r"\A---[ \t]*\r?\n(.*?)\r?\n---[ \t]*(?:\r?\n|\Z)", re.S)
+
+
+def parse_skill(name: str, text: str) -> Skill:
+    """Split a skill file into its front matter (if any) and markdown body."""
+    m = _FRONT.match(text)
+    if not m:
+        return Skill(name, text)
+    try:
+        meta = yaml.safe_load(m.group(1)) or {}
+    except yaml.YAMLError as exc:
+        raise ConfigError("config_invalid", f"skill {name!r}: front matter is not valid YAML: {exc}") from exc
+    if not isinstance(meta, dict):
+        raise ConfigError("config_invalid", f"skill {name!r}: front matter must be a mapping")
+    return Skill(name, text[m.end():].lstrip("\r\n"), meta)
 
 
 @dataclass(frozen=True)
@@ -226,7 +267,8 @@ class ConfigStore:
             p = folder / "skills" / f"{name}.md"
             if not p.is_file():
                 raise ConfigError("config_incomplete", f"skill {name!r} listed but skills/{name}.md missing")
-            skills.append(Skill(name, p.read_text(encoding="utf-8")))
+            skills.append(parse_skill(name, p.read_text(encoding="utf-8")))
+        dictionary = apply_hints(dictionary, [(s.name, s.hints) for s in skills])
         provider = (manifest.get("model") or {}).get("provider", "stub")
         if provider not in ("stub", "gateway"):
             raise ConfigError("config_invalid", f"model.provider must be 'stub' or 'gateway', got {provider!r}")

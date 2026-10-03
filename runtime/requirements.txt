@@ -9,9 +9,11 @@ compressed-rtf==1.0.7      # RTF-only .msg bodies (MIT)
 cryptography==46.0.7
 fastapi==0.141.1
 starlette==1.0.0
-pydantic==2.13.3
+pydantic==2.13.3          # FastAPI's own dependency; our code never imports it
 uvicorn==0.46.0
 httpx==0.28.1
+python-multipart==0.0.26  # file uploads on the reader tools API (extractor_tools.api)
 langgraph==1.2.12
 langgraph-checkpoint==4.2.0
 langchain-core==1.6.6
+PyYAML==6.0.3             # skill front matter

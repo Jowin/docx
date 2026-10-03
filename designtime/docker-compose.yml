@@ -17,19 +17,44 @@ services:
       retries: 10
 
   api:
-    build: .
+    build:
+      context: ..                      # the repo root: the image carries the runtime too
+      dockerfile: designtime/Dockerfile
     container_name: designtime-api
     depends_on:
       postgres:
         condition: service_healthy
     environment:
       DATABASE_URL: postgresql+psycopg2://designtime:designtime@postgres:5432/designtime
+      # Unset = each config's own model provider. Set MODEL_GATEWAY_URL and
+      # MODEL_GATEWAY_TOKEN to let the gateway write skills and run gateway configs.
+      LEARNING_MODEL_PROVIDER: ${LEARNING_MODEL_PROVIDER:-}
+      MODEL_GATEWAY_URL: ${MODEL_GATEWAY_URL:-}
+      MODEL_GATEWAY_TOKEN: ${MODEL_GATEWAY_TOKEN:-}
+    volumes:
+      # The runtime configs in this repo: learned versions land here, where the
+      # runtime service below serves them and git can track them.
+      - ../runtime/configs:/configs
+      - ${LEARNING_DATA:-../runtime/data}:/data:ro
     ports:
       - "8000:8000"
     # Migrations run on start so a fresh clone comes up with one command.
     command: >
       sh -c "alembic upgrade head &&
              uvicorn dataextractor_designtime.main:app --host 0.0.0.0 --port 8000"
+
+  runtime:
+    build: ../runtime
+    container_name: dataextractor-runtime
+    environment:
+      CONFIG_ROOT: /configs
+      MODEL_GATEWAY_URL: ${MODEL_GATEWAY_URL:-}
+      MODEL_GATEWAY_TOKEN: ${MODEL_GATEWAY_TOKEN:-}
+    volumes:
+      - ../runtime/configs:/configs:ro
+      - ${LEARNING_DATA:-../runtime/data}:/data:ro
+    ports:
+      - "8001:8000"
 
 volumes:
   designtime-pgdata:

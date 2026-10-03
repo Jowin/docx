@@ -9,11 +9,11 @@ same report hash (DT-35).
 from __future__ import annotations
 
 from collections import defaultdict
+from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field
-
+from ..records import Record
 from ..config import get_settings
 from ..contracts.artifacts import DetectionRules, FieldSchema, Thresholds, sha256_of
 from ..contracts.corpus import Corpus
@@ -35,9 +35,8 @@ DEFAULT_GATES: dict[str, float] = {
 FALSE_ACCEPT_FLOOR = 0.01
 
 
-class FieldBreakdown(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
+@dataclass(kw_only=True)
+class FieldBreakdown(Record):
     field: str
     expected: int
     correct: int
@@ -45,20 +44,18 @@ class FieldBreakdown(BaseModel):
     critical: bool
 
 
-class FailureExemplar(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
+@dataclass(kw_only=True)
+class FailureExemplar(Record):
     sample_id: str
     audit_id: str
     email_type: str | None
     outcome: str
-    reasons: list[str] = Field(default_factory=list)
-    wrong_fields: list[str] = Field(default_factory=list)
+    reasons: list[str] = field(default_factory=list)
+    wrong_fields: list[str] = field(default_factory=list)
 
 
-class Metrics(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
+@dataclass(kw_only=True)
+class Metrics(Record):
     type_accuracy: float = 0.0
     field_accuracy: float = 0.0
     critical_field_accuracy: float = 0.0
@@ -68,9 +65,8 @@ class Metrics(BaseModel):
     calibration_gap: float = 0.0
 
 
-class EvaluationInput(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
+@dataclass(kw_only=True)
+class EvaluationInput(Record):
     corpus: Corpus
     corpus_root: str | None = None
     schemas: dict[str, FieldSchema]
@@ -80,25 +76,24 @@ class EvaluationInput(BaseModel):
     workflow_id: str
     package_version: str = "0.0.0"
     engine_version: str | None = None
-    gates: dict[str, float] = Field(default_factory=lambda: dict(DEFAULT_GATES))
+    gates: dict[str, float] = field(default_factory=lambda: dict(DEFAULT_GATES))
     #: Evaluate the held-out split only (DT-22); false evaluates everything.
     heldout_only: bool = True
 
 
-class EvaluationOutput(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
+@dataclass(kw_only=True)
+class EvaluationOutput(Record):
     report: dict[str, Any]
     report_sha256: str
     metrics: Metrics
     gates: dict[str, float]
     gate_results: dict[str, bool]
     passed: bool
-    predictions: list[Prediction] = Field(default_factory=list)
-    field_breakdown: list[FieldBreakdown] = Field(default_factory=list)
-    failures: list[FailureExemplar] = Field(default_factory=list)
+    predictions: list[Prediction] = field(default_factory=list)
+    field_breakdown: list[FieldBreakdown] = field(default_factory=list)
+    failures: list[FailureExemplar] = field(default_factory=list)
     #: Samples excluded from source-attribution scoring for lack of a locator (DT-19).
-    attribution_excluded: list[str] = Field(default_factory=list)
+    attribution_excluded: list[str] = field(default_factory=list)
 
 
 class EvaluationAgent(DesignAgent[EvaluationInput, EvaluationOutput]):
@@ -275,11 +270,11 @@ class EvaluationAgent(DesignAgent[EvaluationInput, EvaluationOutput]):
             "heldout_only": payload.heldout_only,
             "engine_version": engine_version,
             "package_version": payload.package_version,
-            "metrics": metrics.model_dump(),
+            "metrics": metrics.to_dict(),
             "gates": gates,
             "gate_results": gate_results,
-            "field_breakdown": [b.model_dump() for b in breakdown],
-            "failures": [f.model_dump() for f in failures],
+            "field_breakdown": [b.to_dict() for b in breakdown],
+            "failures": [f.to_dict() for f in failures],
             "attribution_excluded": sorted(attribution_excluded),
             "generated_by": self.identity,
         }

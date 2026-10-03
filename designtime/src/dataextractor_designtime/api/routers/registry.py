@@ -2,32 +2,32 @@
 
 from __future__ import annotations
 
+from dataclasses import dataclass, field
 from typing import Any
 
 from fastapi import APIRouter, Depends, Query
-from pydantic import BaseModel, ConfigDict, Field
 
+from ...records import Record
 from ...contracts.artifacts import PackageManifest
 from ...registry.errors import RegistryError
 from ...registry.repository import Registry
 from ..deps import as_http, registry_dep, settings_dep
+from ..typed import docs, json_body, out
 
 router = APIRouter(prefix="/registry", tags=["registry"])
 
 
-class PublishRequest(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
+@dataclass(kw_only=True)
+class PublishRequest(Record):
     manifest: PackageManifest
-    artifacts: dict[str, Any] = Field(default_factory=dict)
-    bodies: dict[str, str] = Field(default_factory=dict)
+    artifacts: dict[str, Any] = field(default_factory=dict)
+    bodies: dict[str, str] = field(default_factory=dict)
     eval_report: dict[str, Any] | None = None
     gate_failed: bool = False
 
 
-class PackageSummary(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
+@dataclass(kw_only=True)
+class PackageSummary(Record):
     client_id: str
     workflow_id: str
     version: str
@@ -61,21 +61,26 @@ def _summary(pkg) -> PackageSummary:
     )
 
 
-class SignoffRequest(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
+@dataclass(kw_only=True)
+class SignoffRequest(Record):
     identity: str
     note: str | None = None
 
 
-class PromoteRequest(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
+@dataclass(kw_only=True)
+class PromoteRequest(Record):
     promoted_by: str
 
 
-@router.post("/packages", response_model=PackageSummary, status_code=201, summary="Publish an immutable package version (CTR-01..05, CTR-17)")
-def publish(payload: PublishRequest, registry: Registry = Depends(registry_dep)):
+@router.post(
+    "/packages",
+    summary="Publish an immutable package version (CTR-01..05, CTR-17)",
+    **docs(PublishRequest, PackageSummary, status=201),
+)
+def publish(
+    payload: PublishRequest = Depends(json_body(PublishRequest)),
+    registry: Registry = Depends(registry_dep),
+):
     try:
         pkg = registry.publish(
             manifest=payload.manifest,
@@ -86,26 +91,26 @@ def publish(payload: PublishRequest, registry: Registry = Depends(registry_dep))
         )
     except RegistryError as exc:
         raise as_http(exc) from exc
-    return _summary(pkg)
+    return out(_summary(pkg))
 
 
-@router.get("/packages", response_model=list[PackageSummary], summary="List packages")
+@router.get("/packages", summary="List packages", **docs(response=PackageSummary, many=True))
 def list_packages(
     client_id: str | None = Query(default=None),
     workflow_id: str | None = Query(default=None),
     registry: Registry = Depends(registry_dep),
 ):
-    return [_summary(p) for p in registry.list_packages(client_id, workflow_id)]
+    return out([_summary(p) for p in registry.list_packages(client_id, workflow_id)])
 
 
 @router.get(
     "/packages/{client_id}/{workflow_id}/{version}",
-    response_model=PackageSummary,
     summary="Load a package, verifying every checksum (CTR-02)",
+    **docs(response=PackageSummary),
 )
 def get_package(client_id: str, workflow_id: str, version: str, registry: Registry = Depends(registry_dep)):
     try:
-        return _summary(registry.get(client_id, workflow_id, version))
+        return out(_summary(registry.get(client_id, workflow_id, version)))
     except RegistryError as exc:
         raise as_http(exc) from exc
 
@@ -125,12 +130,13 @@ def get_artifacts(client_id: str, workflow_id: str, version: str, registry: Regi
 @router.post(
     "/packages/{client_id}/{workflow_id}/{version}/signoff",
     summary="Record an immutable human sign-off (DT-33)",
+    **docs(SignoffRequest),
 )
 def sign_off(
     client_id: str,
     workflow_id: str,
     version: str,
-    payload: SignoffRequest,
+    payload: SignoffRequest = Depends(json_body(SignoffRequest)),
     registry: Registry = Depends(registry_dep),
 ):
     try:
@@ -149,12 +155,13 @@ def sign_off(
 @router.post(
     "/packages/{client_id}/{workflow_id}/{version}/promote",
     summary="Promote to production; needs a passing report and a sign-off (CTR-19)",
+    **docs(PromoteRequest),
 )
 def promote(
     client_id: str,
     workflow_id: str,
     version: str,
-    payload: PromoteRequest,
+    payload: PromoteRequest = Depends(json_body(PromoteRequest)),
     registry: Registry = Depends(registry_dep),
 ):
     try:
@@ -174,11 +181,12 @@ def promote(
 @router.post(
     "/workflows/{client_id}/{workflow_id}/rollback",
     summary="Point activation back at the previous promoted version (CTR-20)",
+    **docs(PromoteRequest),
 )
 def rollback(
     client_id: str,
     workflow_id: str,
-    payload: PromoteRequest,
+    payload: PromoteRequest = Depends(json_body(PromoteRequest)),
     registry: Registry = Depends(registry_dep),
 ):
     try:
@@ -191,18 +199,18 @@ def rollback(
 
 @router.get(
     "/workflows/{client_id}/{workflow_id}/active",
-    response_model=PackageSummary | None,
     summary="The one active version in production (CTR-20)",
+    **docs(response=PackageSummary),
 )
 def active(client_id: str, workflow_id: str, registry: Registry = Depends(registry_dep)):
     pkg = registry.active(client_id, workflow_id)
-    return _summary(pkg) if pkg else None
+    return out(_summary(pkg)) if pkg else None
 
 
 @router.get(
     "/workflows/{client_id}/{workflow_id}/resolve",
-    response_model=PackageSummary,
     summary="What runtime resolves at run start, engine-checked (RT-01, CTR-03)",
+    **docs(response=PackageSummary),
 )
 def resolve(
     client_id: str,
@@ -217,7 +225,7 @@ def resolve(
         )
     except RegistryError as exc:
         raise as_http(exc) from exc
-    return _summary(pkg)
+    return out(_summary(pkg))
 
 
 @router.get(

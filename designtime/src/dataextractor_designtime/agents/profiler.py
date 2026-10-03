@@ -8,18 +8,17 @@ than as a mid-run failure.
 
 from __future__ import annotations
 
+from dataclasses import dataclass, field
 from pathlib import Path
 
-from pydantic import BaseModel, ConfigDict, Field
-
+from ..records import Record
 from ..contracts.corpus import Corpus
 from . import filetypes, tabular
 from .base import DesignAgent
 
 
-class AttachmentProfile(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
+@dataclass(kw_only=True)
+class AttachmentProfile(Record):
     filename: str
     detected_mime: str
     declared_mime: str | None = None
@@ -28,43 +27,40 @@ class AttachmentProfile(BaseModel):
     supported_phase_1: bool = False
     readable: bool = True
     unreadable_reason: str | None = None
-    sheet_names: list[str] = Field(default_factory=list)
-    column_labels: list[str] = Field(default_factory=list)
+    sheet_names: list[str] = field(default_factory=list)
+    column_labels: list[str] = field(default_factory=list)
     row_count: int = 0
 
 
-class SampleProfile(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
+@dataclass(kw_only=True)
+class SampleProfile(Record):
     sample_id: str
     email_type: str | None = None
     in_scope: bool = True
     body_chars: int = 0
     subject_chars: int = 0
-    attachments: list[AttachmentProfile] = Field(default_factory=list)
+    attachments: list[AttachmentProfile] = field(default_factory=list)
 
 
-class ProfilerInput(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
+@dataclass(kw_only=True)
+class ProfilerInput(Record):
     corpus: Corpus
     #: Root to resolve relative attachment paths against.
     corpus_root: str | None = None
 
 
-class ProfilerOutput(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
+@dataclass(kw_only=True)
+class ProfilerOutput(Record):
     corpus_id: str
     sample_count: int
-    samples: list[SampleProfile] = Field(default_factory=list)
+    samples: list[SampleProfile] = field(default_factory=list)
     #: detected mime -> number of attachments.
-    attachment_kinds: dict[str, int] = Field(default_factory=dict)
+    attachment_kinds: dict[str, int] = field(default_factory=dict)
     #: Every distinct column/sheet label seen, the input to alias proposal (DT-09).
-    observed_column_labels: list[str] = Field(default_factory=list)
-    observed_sheet_names: list[str] = Field(default_factory=list)
-    unreadable: list[str] = Field(default_factory=list)
-    unsupported: list[str] = Field(default_factory=list)
+    observed_column_labels: list[str] = field(default_factory=list)
+    observed_sheet_names: list[str] = field(default_factory=list)
+    unreadable: list[str] = field(default_factory=list)
+    unsupported: list[str] = field(default_factory=list)
     generated_by: str
 
 

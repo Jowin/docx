@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import copy
+
 import pytest
 
 from dataextractor_designtime.agents import (
@@ -114,7 +116,7 @@ def test_a_declared_type_without_thresholds_is_refused(registry, package_parts):
     built = _build(package_parts)
     artifacts = dict(built.artifacts)
     artifacts["thresholds.json"] = {"schema_version": "1.0", "types": {}, "generated_by": "t"}
-    manifest = built.manifest.model_copy(deep=True)
+    manifest = copy.deepcopy(built.manifest)
     for entry in manifest.artifacts:
         if entry.path == "thresholds.json":
             entry.sha256 = sha256_of(artifacts["thresholds.json"])
@@ -161,7 +163,7 @@ def test_activation_keeps_one_active_version_and_rolls_back(registry, package_pa
     registry.promote(pkg1, "joe@acme.example")
 
     schema, detection, thresholds = package_parts
-    bumped = thresholds.model_copy(deep=True)
+    bumped = copy.deepcopy(thresholds)
     bumped.types["invoice"].accept_at = 0.9
     second = Packager().run(
         PackagerInput(

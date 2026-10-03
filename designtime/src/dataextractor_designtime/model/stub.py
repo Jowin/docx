@@ -180,3 +180,39 @@ class StubModelClient:
         else:
             chosen = {"band": 0.85, "false_accept_rate": None, "review_rate": None}
         return {"accept_at": chosen["band"], "basis": chosen}
+
+    # -- pattern learning --------------------------------------------------
+
+    def _task_pattern_skill_write(self, ev: dict[str, Any]) -> dict[str, Any]:
+        """Write a learned pattern's skill body from the hints the rules derived.
+
+        Adds no hints of its own: the stub has no judgment beyond the rules, so
+        the body restates them in prose for a model reading the skill.
+        """
+        name = ev.get("pattern_name", "pattern")
+        obj = ev.get("object") or "record"
+        fields = (ev.get("hints") or {}).get("fields") or {}
+        lines = [f"## Skill: {name} pattern", "",
+                 f'Learned from samples of the "{name}" pattern. Use it when a document '
+                 f"follows this layout to find each {obj} field.", ""]
+        where = []
+        for fname, h in fields.items():
+            labels = ", ".join(f'"{x}"' for x in h.get("labels", []))
+            if labels:
+                where.append(f"- `{fname}` is labelled {labels}.")
+            for a in h.get("anchors", []):
+                where.append(f'- `{fname}` is the value written just after "{a}".')
+            for sub, sh in (h.get("items") or {}).items():
+                cols = ", ".join(f'"{x}"' for x in sh.get("labels", []))
+                where.append(f"- `{fname}.{sub}` is the column headed {cols}.")
+        if where:
+            lines += ["### Where the fields are", "", *where, ""]
+        missing = [f for f in ev.get("failing_fields", []) if f not in fields]
+        if missing:
+            lines += ["### Not located yet", "",
+                      "These fields failed on the samples and no location was found for them: "
+                      + ", ".join(f"`{f}`" for f in missing) + ". Leave them empty rather than guess.", ""]
+        ref = (ev.get("reference_text") or "").strip()
+        if ref:
+            lines += ["### Reference", "", *("> " + x if x.strip() else ">" for x in ref.splitlines()), ""]
+        return {"body": "\n".join(lines).rstrip() + "\n", "hints": {}}

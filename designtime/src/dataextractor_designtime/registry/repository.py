@@ -194,7 +194,7 @@ class Registry:
             email_types=list(manifest.email_types),
             source_corpus_id=manifest.source_corpus_id,
             created_by=manifest.created_by,
-            manifest=manifest.model_dump(mode="json"),
+            manifest=manifest.to_dict(),
             manifest_sha256=sha256_of(manifest),
             eval_report=eval_report,
             eval_report_sha256=sha256_of(eval_report) if eval_report is not None else None,

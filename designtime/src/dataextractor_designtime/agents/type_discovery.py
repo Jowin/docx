@@ -9,9 +9,9 @@ from __future__ import annotations
 
 import re
 from collections import Counter
+from dataclasses import dataclass, field
 
-from pydantic import BaseModel, ConfigDict, Field
-
+from ..records import Record
 from ..contracts.corpus import Corpus
 from ..model.base import ModelRequest
 from .base import DesignAgent
@@ -27,29 +27,26 @@ _STOPWORDS = {
 MIN_EXEMPLARS = 3
 
 
-class TypeProposal(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
+@dataclass(kw_only=True)
+class TypeProposal(Record):
     email_type: str
     sample_count: int
-    exemplars: list[str] = Field(default_factory=list)
-    frequent_terms: list[str] = Field(default_factory=list)
+    exemplars: list[str] = field(default_factory=list)
+    frequent_terms: list[str] = field(default_factory=list)
     #: DT-07 requires at least three exemplars; below that the proposal is weak.
     sufficient_exemplars: bool = True
     rationale: str = ""
 
 
-class TypeDiscoveryInput(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
+@dataclass(kw_only=True)
+class TypeDiscoveryInput(Record):
     corpus: Corpus
 
 
-class TypeDiscoveryOutput(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
+@dataclass(kw_only=True)
+class TypeDiscoveryOutput(Record):
     corpus_id: str
-    proposals: list[TypeProposal] = Field(default_factory=list)
+    proposals: list[TypeProposal] = field(default_factory=list)
     out_of_scope_count: int = 0
     #: Always true. Generation is gated on an explicit confirmation (DT-07).
     requires_confirmation: bool = True

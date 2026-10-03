@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import pytest
-from pydantic import ValidationError
+from dataextractor_designtime.records import ValidationError
 
 from dataextractor_designtime.contracts import (
     ExtractedValue,

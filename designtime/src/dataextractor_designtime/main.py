@@ -12,6 +12,7 @@ from sqlalchemy import text
 from . import __version__
 from .agents import AGENTS
 from .api.routers import agents as agents_router
+from .api.routers import learning as learning_router
 from .api.routers import registry as registry_router
 from .api.routers import runs as runs_router
 from .config import get_settings
@@ -24,13 +25,15 @@ app = FastAPI(
     description=(
         "Implements PRD 2 (design-time) against the contracts in PRD 1. "
         "Each agent is reachable at /agents/{name}/run with its own typed "
-        "request and response; /runs chains them into one authoring run."
+        "request and response; /runs chains them into one authoring run; "
+        "/learning/runs learns a skill from one sample of a document pattern."
     ),
 )
 
 app.include_router(agents_router.router)
 app.include_router(registry_router.router)
 app.include_router(runs_router.router)
+app.include_router(learning_router.router)
 
 
 @app.get("/health", tags=["meta"], summary="Liveness and database reachability")
@@ -61,4 +64,5 @@ def components() -> dict[str, object]:
         ],
         "registry": "/registry",
         "authoring_run": "/runs",
+        "pattern_learning": "/learning/runs",
     }

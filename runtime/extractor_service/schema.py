@@ -63,6 +63,9 @@ class Field:
     values: tuple[str, ...] = ()
     grounding: str = "required"
     items: tuple["Field", ...] = ()
+    #: Text that comes just before the value anywhere in a line ("please pay"),
+    #: for values that sit mid-sentence rather than after a label.
+    anchors: tuple[str, ...] = ()
 
     @property
     def labels(self) -> tuple[str, ...]:
@@ -86,6 +89,8 @@ class Field:
             out["values"] = list(self.values)
         if self.grounding != "required":
             out["grounding"] = self.grounding
+        if self.anchors:
+            out["anchors"] = list(self.anchors)
         if self.items:
             out["items"] = [f.describe() for f in self.items]
         return out
@@ -149,10 +154,14 @@ def _field(obj: Any, where: str, *, nested: bool) -> Field:
     aliases = obj.get("aliases", [])
     if not isinstance(aliases, list) or not all(isinstance(a, str) for a in aliases):
         raise ConfigError("schema_invalid", f"{where}.{name}: aliases must be a list of strings")
+    anchors = obj.get("anchors", [])
+    if not isinstance(anchors, list) or not all(isinstance(a, str) and a.strip() for a in anchors):
+        raise ConfigError("schema_invalid", f"{where}.{name}: anchors must be a list of strings")
     return Field(name=name, type=ftype, required=bool(obj.get("required", False)),
                  critical=bool(obj.get("critical", False)),
                  description=str(obj.get("description", "")), aliases=tuple(aliases),
-                 pattern=pattern, values=values, grounding=grounding, items=items)
+                 pattern=pattern, values=values, grounding=grounding, items=items,
+                 anchors=tuple(a.strip() for a in anchors))
 
 
 def _unique(fields: tuple[Field, ...], where: str) -> None:
@@ -179,6 +188,74 @@ def load_dictionary(obj: Any) -> DataDictionary:
     return DataDictionary(name=str(obj.get("name", "extraction")),
                           version=str(obj.get("version", "1")), fields=fields,
                           description=str(obj.get("description", "")), record_key=key)
+
+
+# ------------------------------------------------------------------ skill hints
+
+HINT_KEYS = ("labels", "anchors")
+_MAX_HINT_CHARS = 80
+
+
+def _hint_list(value: Any, where: str) -> tuple[str, ...]:
+    if value is None:
+        return ()
+    if not isinstance(value, list) or not all(isinstance(v, str) for v in value):
+        raise ConfigError("config_invalid", f"{where} must be a list of strings")
+    out = []
+    for v in value:
+        v = " ".join(v.split())
+        if not v or len(v) > _MAX_HINT_CHARS:
+            raise ConfigError("config_invalid", f"{where}: hints are 1-{_MAX_HINT_CHARS} characters")
+        out.append(v)
+    return tuple(out)
+
+
+def _hinted(f: Field, spec: Any, where: str) -> Field:
+    if not isinstance(spec, dict):
+        raise ConfigError("config_invalid", f"{where} must be an object")
+    unknown = set(spec) - set(HINT_KEYS) - {"items"}
+    if unknown:
+        raise ConfigError("config_invalid", f"{where}: unknown hint keys {sorted(unknown)}")
+    labels = _hint_list(spec.get("labels"), f"{where}.labels")
+    anchors = _hint_list(spec.get("anchors"), f"{where}.anchors")
+    items = f.items
+    if spec.get("items") is not None:
+        if f.type != "array" or not isinstance(spec["items"], dict):
+            raise ConfigError("config_invalid", f"{where}.items applies to array fields only")
+        index = {i.name: i for i in f.items}
+        for sub, sub_spec in spec["items"].items():
+            if sub not in index:
+                raise ConfigError("config_invalid", f"{where}.items: {f.name} has no item {sub!r}")
+            index[sub] = _hinted(index[sub], sub_spec, f"{where}.items.{sub}")
+        items = tuple(index[i.name] for i in f.items)
+    aliases = f.aliases + tuple(a for a in labels if a.casefold() not in {x.casefold() for x in f.aliases})
+    anchor_set = f.anchors + tuple(a for a in anchors if a not in f.anchors)
+    return Field(**{**f.__dict__, "aliases": aliases, "anchors": anchor_set, "items": items})
+
+
+def apply_hints(dictionary: DataDictionary, hints: list[tuple[str, dict[str, Any]]]) -> DataDictionary:
+    """Fold skills' machine-readable hints into the dictionary.
+
+    ``hints`` is ``[(skill_name, {"fields": {field: {"labels": [...], "anchors": [...],
+    "items": {sub: {...}}}}})]`` in skill order. Labels become aliases; anchors
+    are kept on the field. A hint naming a field the dictionary lacks is a
+    config error, so a learned skill cannot silently drift from its schema.
+    """
+    fields = {f.name: f for f in dictionary.fields}
+    for skill, h in hints:
+        if not h:
+            continue
+        if not isinstance(h, dict) or set(h) - {"fields"}:
+            raise ConfigError("config_invalid", f"skill {skill!r}: hints may only hold 'fields'")
+        for name, spec in (h.get("fields") or {}).items():
+            if name not in fields:
+                raise ConfigError("config_invalid", f"skill {skill!r}: hint for unknown field {name!r}")
+            fields[name] = _hinted(fields[name], spec, f"skill {skill}: {name}")
+    if all(fields[f.name] is f for f in dictionary.fields):
+        return dictionary
+    return DataDictionary(name=dictionary.name, version=dictionary.version,
+                          fields=tuple(fields[f.name] for f in dictionary.fields),
+                          description=dictionary.description, record_key=dictionary.record_key)
 
 
 # ------------------------------------------------------------------ values

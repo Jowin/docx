@@ -46,6 +46,8 @@ class Outcome:
     status: str
     audit_id: str
     reasons: list[str] = field(default_factory=list)
+    cfg: Any = field(default=None, repr=False)            # the ExtractionConfig used
+    docs: list[Any] = field(default_factory=list, repr=False)  # evidence documents read
 
 
 # ------------------------------------------------------------------ file location
@@ -112,4 +114,4 @@ def run(graph: Any, settings: Settings, *, file_location: str, client: str | Non
         settings.audit_dir.mkdir(parents=True, exist_ok=True)
         (settings.audit_dir / f"{state['audit_id']}.json").write_text(json.dumps(extended, indent=1, default=str))
     return Outcome(data=data_out, extended=extended, status=state["status"],
-                   audit_id=state["audit_id"], reasons=state["reasons"])
+                   audit_id=state["audit_id"], reasons=state["reasons"], cfg=cfg, docs=docs)

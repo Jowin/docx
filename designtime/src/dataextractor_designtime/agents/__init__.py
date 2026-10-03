@@ -1,7 +1,13 @@
 from .base import AgentError, ConfirmationRequired, CorpusTooSmall, DesignAgent
 from .detection_rules import DetectionRulesAgent, DetectionRulesInput, DetectionRulesOutput
+from .extraction_judge import ExtractionJudge, ExtractionJudgeInput, ExtractionJudgeOutput
 from .evaluation import EvaluationAgent, EvaluationInput, EvaluationOutput
 from .field_schema import FieldSchemaAgent, FieldSchemaInput, FieldSchemaOutput
+from .pattern_skill_writer import (
+    PatternSkillWriter,
+    PatternSkillWriterInput,
+    PatternSkillWriterOutput,
+)
 from .packager import Packager, PackagerInput, PackagerOutput, SkillBundle
 from .profiler import CorpusProfiler, ProfilerInput, ProfilerOutput
 from .skill_author import SkillAuthorAgent, SkillAuthorInput, SkillAuthorOutput
@@ -23,6 +29,8 @@ AGENTS = {
     ThresholdTuner.name: ThresholdTuner,
     EvaluationAgent.name: EvaluationAgent,
     Packager.name: Packager,
+    ExtractionJudge.name: ExtractionJudge,
+    PatternSkillWriter.name: PatternSkillWriter,
 }
 
 __all__ = [
@@ -38,12 +46,18 @@ __all__ = [
     "EvaluationAgent",
     "EvaluationInput",
     "EvaluationOutput",
+    "ExtractionJudge",
+    "ExtractionJudgeInput",
+    "ExtractionJudgeOutput",
     "FieldSchemaAgent",
     "FieldSchemaInput",
     "FieldSchemaOutput",
     "Packager",
     "PackagerInput",
     "PackagerOutput",
+    "PatternSkillWriter",
+    "PatternSkillWriterInput",
+    "PatternSkillWriterOutput",
     "Prediction",
     "ProfilerInput",
     "ProfilerOutput",

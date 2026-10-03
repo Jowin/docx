@@ -7,10 +7,10 @@ the diff against the previous version rather than chosen by hand.
 
 from __future__ import annotations
 
+from dataclasses import dataclass, field
 from typing import Any
 
-from pydantic import BaseModel, ConfigDict, Field
-
+from ..records import Record
 from ..config import get_settings
 from ..contracts.artifacts import (
     ArtifactKind,
@@ -30,23 +30,21 @@ DETECTION_PATH = "rules/detection.json"
 EVAL_PATH = "eval/report.json"
 
 
-class SkillBundle(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
+@dataclass(kw_only=True)
+class SkillBundle(Record):
     manifest: SkillManifest
     body: str
 
 
-class PackagerInput(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
+@dataclass(kw_only=True)
+class PackagerInput(Record):
     client_id: str
     workflow_id: str
     source_corpus_id: str
     schemas: dict[str, FieldSchema]
     detection: DetectionRules
     thresholds: Thresholds
-    skills: list[SkillBundle] = Field(default_factory=list)
+    skills: list[SkillBundle] = field(default_factory=list)
     eval_report: dict[str, Any] | None = None
     #: The version the designer intends to publish. Omit to let the packager
     #: derive the smallest sufficient bump from the diff.
@@ -55,15 +53,14 @@ class PackagerInput(BaseModel):
     previous_artifacts: dict[str, Any] | None = None
     engine_range: str | None = None
     reviewed_by: str | None = None
-    email_types: list[str] = Field(default_factory=list)
+    email_types: list[str] = field(default_factory=list)
 
 
-class PackagerOutput(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
+@dataclass(kw_only=True)
+class PackagerOutput(Record):
     manifest: PackageManifest
-    artifacts: dict[str, Any] = Field(default_factory=dict)
-    bodies: dict[str, str] = Field(default_factory=dict)
+    artifacts: dict[str, Any] = field(default_factory=dict)
+    bodies: dict[str, str] = field(default_factory=dict)
     required_bump: str
     declared_bump: str
     #: DT-34: set when the supplied evaluation report failed a gate.
@@ -81,8 +78,8 @@ class Packager(DesignAgent[PackagerInput, PackagerOutput]):
 
         def add_json(path: str, model: Any, kind: ArtifactKind) -> None:
             if payload.reviewed_by and getattr(model, "reviewed_by", None) is None:
-                model = model.model_copy(update={"reviewed_by": payload.reviewed_by})
-            content = model.model_dump(mode="json") if hasattr(model, "model_dump") else model
+                model = model.replace(reviewed_by=payload.reviewed_by)
+            content = model.to_dict() if isinstance(model, Record) else model
             artifacts[path] = content
             entries.append(ManifestArtifactEntry(path=path, kind=kind, sha256=sha256_of(content)))
 

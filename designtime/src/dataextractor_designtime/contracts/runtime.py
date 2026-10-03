@@ -8,12 +8,12 @@ imported by both sides.
 from __future__ import annotations
 
 import re
+from dataclasses import dataclass, field
 from datetime import datetime, timezone
-from typing import Annotated, Any, Literal
+from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from ..records import Confidence, Record
 
-Confidence = Annotated[float, Field(ge=0.0, le=1.0)]
 
 # CTR-16: closed vocabulary. Codes with an argument use "<code>:<arg>".
 REVIEW_REASON_SIMPLE = frozenset(
@@ -51,26 +51,21 @@ def validate_reason_code(code: str) -> str:
     raise ValueError(f"unknown review_reason code: {code!r}")
 
 
-class ExtractedValue(BaseModel):
+@dataclass(kw_only=True)
+class ExtractedValue(Record):
     """CTR-12: every extracted value is {value, source, confidence}."""
-
-    model_config = ConfigDict(extra="forbid")
 
     value: Any
     source: str
     confidence: Confidence
 
-    @field_validator("source")
-    @classmethod
-    def _locatable(cls, v: str) -> str:
-        if not _SOURCE_RE.match(v):
-            raise ValueError(f"source not locatable (CTR-13): {v!r}")
-        return v
+    def check(self) -> None:
+        if not _SOURCE_RE.match(self.source):
+            raise ValueError(f"source not locatable (CTR-13): {self.source!r}")
 
 
-class ExtractionResult(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
+@dataclass(kw_only=True)
+class ExtractionResult(Record):
     audit_id: str
     client_id: str
     workflow_id: str
@@ -78,50 +73,49 @@ class ExtractionResult(BaseModel):
     engine_version: str
     type: str
     confidence: Confidence
-    fields: dict[str, ExtractedValue] = Field(default_factory=dict)
+    fields: dict[str, ExtractedValue] = field(default_factory=dict)
     human_corrected: bool = False
-    completed_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    completed_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
 
-class ReviewQueueEntry(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
+@dataclass(kw_only=True)
+class ReviewQueueEntry(Record):
     audit_id: str
     client_id: str
     workflow_id: str
     package_version: str
     type: str | None = None
     confidence: Confidence = 0.0
-    partial_fields: dict[str, ExtractedValue] = Field(default_factory=dict)
-    review_reason: list[str] = Field(default_factory=list)
-    raw_sources: list[str] = Field(default_factory=list)
-    queued_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    partial_fields: dict[str, ExtractedValue] = field(default_factory=dict)
+    review_reason: list[str] = field(default_factory=list)
+    raw_sources: list[str] = field(default_factory=list)
+    queued_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
 
-    @field_validator("review_reason")
-    @classmethod
-    def _closed_vocabulary(cls, v: list[str]) -> list[str]:
-        return [validate_reason_code(code) for code in v]
+    def check(self) -> None:
+        self.review_reason = [validate_reason_code(code) for code in self.review_reason]
 
 
-class AgentTraceEntry(BaseModel):
-    model_config = ConfigDict(extra="allow")
+@dataclass(kw_only=True)
+class AgentTraceEntry(Record):
+    #: Agents add their own trace keys; they are kept, flattened, in ``to_dict()``.
+    __extra__ = "allow"
 
     agent: str
     started_ms: int = 0
     duration_ms: int = 0
     status: Literal["ok", "flagged", "failed", "skipped"] = "ok"
+    extra: dict[str, Any] = field(default_factory=dict)
 
 
-class AuditRecord(BaseModel):
+@dataclass(kw_only=True)
+class AuditRecord(Record):
     """CTR-14: one per run, always, including on hard failure."""
-
-    model_config = ConfigDict(extra="forbid")
 
     audit_id: str
     package_version: str
     engine_version: str
-    received_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
+    received_at: datetime = field(default_factory=lambda: datetime.now(timezone.utc))
     outcome: Literal["extracted", "review_queued", "error"]
-    agent_trace: list[AgentTraceEntry] = Field(default_factory=list)
-    field_attribution: list[dict[str, Any]] = Field(default_factory=list)
-    retries: list[dict[str, Any]] = Field(default_factory=list)
+    agent_trace: list[AgentTraceEntry] = field(default_factory=list)
+    field_attribution: list[dict[str, Any]] = field(default_factory=list)
+    retries: list[dict[str, Any]] = field(default_factory=list)

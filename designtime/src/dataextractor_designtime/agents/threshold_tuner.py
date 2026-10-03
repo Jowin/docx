@@ -7,8 +7,9 @@ candidate band so the designer sees what each one costs in review volume.
 
 from __future__ import annotations
 
-from pydantic import BaseModel, ConfigDict, Field
+from dataclasses import dataclass, field
 
+from ..records import Record
 from ..contracts.artifacts import Thresholds, TypeThresholds
 from ..model.base import ModelRequest
 from .base import DesignAgent
@@ -16,10 +17,9 @@ from .base import DesignAgent
 DEFAULT_CANDIDATES = [0.50, 0.60, 0.70, 0.75, 0.80, 0.85, 0.90, 0.95]
 
 
-class Prediction(BaseModel):
+@dataclass(kw_only=True)
+class Prediction(Record):
     """One held-out prediction, as the evaluation harness reports it."""
-
-    model_config = ConfigDict(extra="forbid")
 
     sample_id: str
     email_type: str
@@ -30,9 +30,8 @@ class Prediction(BaseModel):
     all_correct: bool
 
 
-class BandTradeoff(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
+@dataclass(kw_only=True)
+class BandTradeoff(Record):
     band: float
     accepted: int
     review_rate: float
@@ -40,15 +39,14 @@ class BandTradeoff(BaseModel):
     residual_error_above_band: float
 
 
-class ThresholdTunerInput(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
-    predictions: list[Prediction] = Field(default_factory=list)
-    candidates: list[float] = Field(default_factory=lambda: list(DEFAULT_CANDIDATES))
+@dataclass(kw_only=True)
+class ThresholdTunerInput(Record):
+    predictions: list[Prediction] = field(default_factory=list)
+    candidates: list[float] = field(default_factory=lambda: list(DEFAULT_CANDIDATES))
     #: DT-27 platform floor; a band above this false-accept rate is not viable.
     max_false_accept: float = 0.01
-    critical_field_tolerance: dict[str, dict[str, dict[str, float]]] = Field(default_factory=dict)
-    always_review_if: list[str] = Field(
+    critical_field_tolerance: dict[str, dict[str, dict[str, float]]] = field(default_factory=dict)
+    always_review_if: list[str] = field(
         default_factory=lambda: [
             "encrypted_no_key",
             "attachment_parse_failed",
@@ -57,20 +55,18 @@ class ThresholdTunerInput(BaseModel):
     )
 
 
-class TypeTuning(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
+@dataclass(kw_only=True)
+class TypeTuning(Record):
     email_type: str
     chosen_band: float
-    tradeoffs: list[BandTradeoff] = Field(default_factory=list)
-    basis: dict[str, float | None] = Field(default_factory=dict)
+    tradeoffs: list[BandTradeoff] = field(default_factory=list)
+    basis: dict[str, float | None] = field(default_factory=dict)
 
 
-class ThresholdTunerOutput(BaseModel):
-    model_config = ConfigDict(extra="forbid")
-
+@dataclass(kw_only=True)
+class ThresholdTunerOutput(Record):
     artifact: Thresholds
-    tuning: list[TypeTuning] = Field(default_factory=list)
+    tuning: list[TypeTuning] = field(default_factory=list)
 
 
 class ThresholdTuner(DesignAgent[ThresholdTunerInput, ThresholdTunerOutput]):
@@ -90,7 +86,7 @@ class ThresholdTuner(DesignAgent[ThresholdTunerInput, ThresholdTunerOutput]):
                 ModelRequest(
                     task="threshold_tuner.choose_band",
                     evidence={
-                        "candidates": [t.model_dump() for t in tradeoffs],
+                        "candidates": [t.to_dict() for t in tradeoffs],
                         "max_false_accept": payload.max_false_accept,
                     },
                 )

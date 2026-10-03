@@ -8,14 +8,14 @@ ModelClient seam rather than being decided in the agent itself.
 
 from __future__ import annotations
 
+from dataclasses import dataclass, field
 from typing import Any, ClassVar, Generic, TypeVar
 
-from pydantic import BaseModel
-
+from ..records import Record
 from ..model.base import ModelClient
 
-InputT = TypeVar("InputT", bound=BaseModel)
-OutputT = TypeVar("OutputT", bound=BaseModel)
+InputT = TypeVar("InputT", bound=Record)
+OutputT = TypeVar("OutputT", bound=Record)
 
 
 class AgentError(Exception):
