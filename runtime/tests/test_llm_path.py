@@ -60,7 +60,7 @@ def test_model_answer_is_verified_against_the_evidence(settings):
     assert f["due_date"]["grounding"] == "relocated"
     assert f["due_date"]["source"] == "attachment:INV-20194.xlsx#Invoice!B5"
     assert f["tax_amount"]["value"] is None and f["tax_amount"]["rejected"]["value"] == "999.99"
-    assert "unverified_value:tax_amount" in e["review_reasons"]
+    assert "unverified_value:tax_amount" in e["flags"]
     assert [i["description"] for i in e["data"][0]["line_items"]] == ["Consulting"]
     model = e["metadata"]["model"]
     assert model["provider"] == "gateway" and model["name"] == "default"
@@ -97,7 +97,9 @@ def test_tool_schema_follows_the_dictionary(config_root):
     assert set(items) == {"description", "quantity", "unit_price", "amount"}
 
 
-def test_model_that_skips_the_tool_is_a_typed_error(settings):
+def test_model_that_skips_the_tool_is_a_flagged_result(settings):
     r = _client(settings, FakeGateway({}, tool=None)).post(
         "/extract", json={"file_location": "invoice.xlsx", "client": "acme"})
-    assert r.status_code == 502 and r.json()["error"] == "model_failed"
+    e = r.json()
+    assert r.status_code == 200 and e["flagged"] is True and "error:model_failed" in e["flags"]
+    assert e["metadata"]["model_error"]["message"].startswith("model did not call")

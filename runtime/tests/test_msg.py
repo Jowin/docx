@@ -9,6 +9,7 @@ import pytest
 from extractor_service.config_store import DEFAULT_INTAKE
 from extractor_service.intake import detect_kind, open_submission
 from extractor_service.msg import read_msg, rtf_to_text
+from tests.conftest import data_of
 from tests.msg_writer import build_msg
 from tests.samples import invoice_msg, invoice_xlsx, statement_csv
 
@@ -59,7 +60,7 @@ def test_kind_is_detected_from_bytes_whatever_the_name(client, input_root):
 def test_rtf_only_body_is_read(client, input_root):
     (input_root / "rtf.msg").write_bytes(build_msg(subject="Invoice", sender_name="Café Lumière",
                                                    rtf_compressed=compressed_rtf.compress(PLAIN_RTF, compressed=True)))
-    [body] = client.post("/extract", json={"file_location": "rtf.msg"}).json()
+    [body] = data_of(client.post("/extract", json={"file_location": "rtf.msg"}))
     assert body["invoice_number"] == "INV-77" and body["invoice_date"] == "2026-07-01"
     assert body["vendor"] == "Café Lumière" and body["total_amount"] == 450
 
@@ -80,29 +81,33 @@ def test_ansi_strings_use_the_message_code_page():
     assert (m.subject, m.sender, m.body_text) == ("Réf facture", "Société Générale", "Montant dû: 1.234,56 €")
 
 
-def test_attached_message_is_flagged_and_other_attachments_still_read():
-    inner = build_msg(subject="older thread", body="older", embedded=True)
+def test_attached_outlook_item_is_read_recursively():
+    inner = build_msg(subject="older thread", body="Invoice No: INV-5\r\nTotal Due: $5.00", embedded=True,
+                      attachments=[{"name": "inner.csv", "data": statement_csv()}])
     data = build_msg(subject="Fwd: statement", body="see attached",
                      attachments=[{"name": "Original message", "msg": inner},
                                   {"name": "statement.csv", "data": statement_csv()}])
     sub = open_submission("f.msg", "f.msg", data, DEFAULT_INTAKE)
-    assert [i.name for i in sub.items] == ["statement.csv"]
-    assert {"item": "Original message", "reason": "embedded_email"} in sub.skipped
-    assert "embedded_email_not_supported" in sub.reasons
+    assert [(i.kind, i.source_prefix) for i in sub.items] == [
+        ("email_body", "body"), ("email_body", "embedded:1:Original message"),
+        ("csv", "embedded:1:Original message/inner.csv"), ("csv", "attachment:statement.csv")]
+    assert sub.items[1].meta["subject"] == "older thread" and sub.reasons == []
 
 
-def test_msg_inside_eml_and_zip_is_treated_as_an_attached_email():
+def test_msg_inside_eml_and_zip_is_read_as_an_attached_email():
     eml = EmailMessage()
     eml["Subject"] = "Fwd"
     eml.set_content("forwarding")
     eml.add_attachment(invoice_msg(), maintype="application", subtype="vnd.ms-outlook", filename="orig.msg")
     sub = open_submission("e.eml", "e.eml", bytes(eml), DEFAULT_INTAKE)
-    assert sub.skipped == [{"item": "orig.msg", "reason": "embedded_email"}]
+    assert [i.source_prefix for i in sub.items] == ["body", "embedded:1:orig.msg",
+                                                    "embedded:1:orig.msg/INV-20194.xlsx"]
+    assert {"item": "orig.msg/logo.png", "reason": "image_not_supported"} in sub.skipped
     buf = io.BytesIO()
     with zipfile.ZipFile(buf, "w") as z:
         z.writestr("orig.msg", invoice_msg())
     sub = open_submission("z.zip", "z.zip", buf.getvalue(), DEFAULT_INTAKE)
-    assert sub.skipped == [{"item": "z.zip/orig.msg", "reason": "embedded_email"}]
+    assert [i.source_prefix for i in sub.items] == ["embedded:1:orig.msg", "embedded:1:orig.msg/INV-20194.xlsx"]
 
 
 def test_zip_attached_to_msg_is_unpacked():
@@ -112,17 +117,20 @@ def test_zip_attached_to_msg_is_unpacked():
     sub = open_submission("m.msg", "m.msg", build_msg(subject="Invoices", body="attached",
                                                       attachments=[{"name": "batch.zip", "data": buf.getvalue()}]),
                           DEFAULT_INTAKE)
-    assert [i.source_prefix for i in sub.items] == ["attachment:batch.zip/invoice.xlsx"]
+    assert [i.source_prefix for i in sub.items] == ["body", "attachment:batch.zip/invoice.xlsx"]
 
 
 def test_duplicate_attachment_names_kept_apart():
     sub = open_submission("d.msg", "d.msg", build_msg(subject="two", body="x", attachments=[
         {"name": "s.csv", "data": statement_csv()}, {"name": "s.csv", "data": statement_csv()}]), DEFAULT_INTAKE)
-    assert [i.name for i in sub.items] == ["s.csv", "s (2).csv"]
+    assert [i.name for i in sub.items if i.kind != "email_body"] == ["s.csv", "s (2).csv"]
 
 
 @pytest.mark.parametrize("cut", [600, 2000])
-def test_damaged_msg_is_a_typed_error(client, input_root, cut):
+def test_damaged_msg_is_still_a_result_flagged_with_the_error(client, input_root, cut):
     (input_root / "bad.msg").write_bytes(invoice_msg()[:cut])
     r = client.post("/extract", json={"file_location": "bad.msg"})
-    assert r.status_code == 422 and r.json()["error"] in ("malformed_email", "unsupported_input:ole2")
+    body = r.json()
+    assert r.status_code == 200 and r.headers["x-extraction-status"] == "extracted"
+    assert body["flagged"] is True and body["data"] == []
+    assert body["flags"][0] in ("error:malformed_email", "error:unsupported_input:ole2")

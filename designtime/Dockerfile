@@ -11,7 +11,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1
 
 RUN apt-get update \
- && apt-get install -y --no-install-recommends build-essential libpq-dev \
+ && apt-get install -y --no-install-recommends build-essential libpq-dev tesseract-ocr tesseract-ocr-eng \
  && rm -rf /var/lib/apt/lists/*
 
 # The runtime, exactly as it ships, for isolated extractions.
@@ -34,7 +34,8 @@ RUN pip install -e ".[dev]"
 ENV PYTHONPATH=/app/src \
     RUNTIME_DIR=/app/runtime \
     RUNTIME_CONFIG_ROOT=/configs \
-    LEARNING_INPUT_ROOT=/data
+    LEARNING_INPUT_ROOT=/data \
+    LEARNING_STATE_DIR=/learning-state
 EXPOSE 8000
 
 CMD ["uvicorn", "dataextractor_designtime.main:app", "--host", "0.0.0.0", "--port", "8000"]

@@ -1,19 +1,23 @@
 # DataExtractor runtime
 
-Extracts the fields a data dictionary defines from an email (`.eml` or Outlook `.msg`), a zip, or a
-single CSV, Excel (`.xlsx`, `.xlsm`, `.xls`) or PDF file. Images are recorded and
-skipped. One FastAPI service, one self-contained Docker image. The pipeline is a
-LangGraph state graph, and every model call goes through one gateway function.
-Requests are validated by plain functions; no pydantic is imported by this code
-(FastAPI still installs it for itself).
+Extracts the fields a data dictionary defines from an email (`.eml` or Outlook
+`.msg`, attached emails included), a zip, or a single CSV, Excel (`.xlsx`,
+`.xlsm`, `.xls`), PDF (scanned pages by OCR) or DOCX file. One FastAPI service
+and one self-contained Docker image. It answers synchronously, by webhook, or
+by polling. The pipeline is a LangGraph state graph, every model call goes
+through one gateway function, and no pydantic is imported by this code.
 
 ```
-POST /extract   {"file_location": "invoice-email.eml"}                    -> the data
-POST /extract   {"file_location": "invoice-email.eml", "extended": true}  -> data + confidence + metadata
-GET  /configs   every client / use case / version, and the defaults
-GET  /graph     the pipeline graph, as Mermaid text
-GET  /health    liveness, plus any config that failed to load
-GET  /docs      Swagger UI for trying requests by hand
+POST /extract                          run an extraction: now, by webhook, or queued for polling
+GET  /extractions/{job_id}             poll: inprogress, or extracted with the result
+GET  /extractions                      recent jobs
+POST /extractions/{job_id}/redeliver   send the result to the webhook again
+GET  /review, /review/{job_id}         flagged results waiting for a person
+POST /review/{job_id}/resolve          correct or reject; corrections are delivered as human_corrected
+GET  /review/corrections/export        corrected results as ground truth for design-time learning
+GET  /metrics, /metrics/prometheus     throughput, flag rate, latency, cost per client and use case
+GET  /audit/verify                     check the audit hash chain
+GET  /configs, /graph, /health, /docs
 ```
 
 ## Run it
@@ -22,200 +26,293 @@ GET  /docs      Swagger UI for trying requests by hand
 
 ```
 docker build -t dataextractor-runtime .
-docker run --rm -p 8000:8000 -v D:\data:/data dataextractor-runtime
+docker run --rm -p 8000:8000 -v D:\data:/data -v extractor-state:/state dataextractor-runtime
 ```
 
-Put input files in the mounted folder (`D:\data` above); `file_location` is
-relative to it. To use your own configs instead of the ones baked into the image,
-add `-v D:\configs:/app/configs`. For configs that use a model, add
-`-e MODEL_GATEWAY_URL=... -e MODEL_GATEWAY_TOKEN=...` (see Model gateway).
+Input files go in the mounted `/data` folder; `file_location` is relative to it.
+`/state` holds the job queue, checkpoints, the spool and the audit chain. Mount
+a volume there, shared by every API and worker container of one deployment. To
+use your own configs, add `-v D:\configs:/app/configs`. For configs that use a
+model, add `-e MODEL_GATEWAY_URL=... -e MODEL_GATEWAY_TOKEN=...`. More workers:
+`docker run ... dataextractor-runtime python -m extractor_service.worker`.
 
 **Without Docker**
 
 ```
-pip install -r requirements.txt
-set INPUT_ROOT=D:\data              (export INPUT_ROOT=... on macOS/Linux)
+pip install -r requirements.txt         (tesseract on PATH for OCR, optional)
+set INPUT_ROOT=D:\data                  (export INPUT_ROOT=... on macOS/Linux)
 uvicorn extractor_service.api:app --port 8000
 ```
-
-Then open http://localhost:8000/docs and try `POST /extract`.
 
 **Sample files and tests**
 
 ```
 pip install -r requirements-dev.txt
 python -m tests.samples D:\data     # writes eight sample inputs
-pytest                              # 169 tests (service and reader tools)
+pytest                              # 202 tests (service, platform and reader tools)
 ```
 
 ## Request
 
+`POST /extract` takes a JSON object:
+
 | Field | Required | Meaning |
 | --- | --- | --- |
 | `file_location` | yes | Path to the input, inside `INPUT_ROOT` (absolute, or relative to it) |
-| `client` | no | Config client; defaults from `configs/defaults.json` |
-| `usecase` | no | Config use case |
-| `version` | no | Config version, or `latest` |
-| `extended` | no | `true` adds confidence, sources, review reasons and metadata |
+| `client`, `usecase`, `version` | no | The config; defaults from `configs/defaults.json`; `version` may be `latest` |
+| `extended` | no | `true`: always return the extended result |
+| `callback_url` | no | Webhook: answer `202` now and POST the result there when ready |
+| `async` | no | `true`: answer `202` now; poll `GET /extractions/{job_id}` |
+| `idempotency_key` | no | The same key within the dedupe window is the same job and result |
 
-Unknown request fields are rejected, so a typo like `extnded` fails loudly. A bad
-body is a 422 `invalid_request` whose `detail.errors` lists each problem, e.g.
-`{"loc": "extended", "msg": "must be a boolean"}`.
+Unknown fields are rejected, so a typo like `extnded` fails loudly. A bad body is a
+422 `invalid_request` whose `detail.errors` lists each problem, e.g.
+`{"loc": "extended", "msg": "must be a boolean"}`. That is the only time an
+`/extract` call does not end in a result.
 
-## Response
+## Status and result
 
-The response is **always an array of records**, each shaped by the data
-dictionary: one key per field, in dictionary order, `null` where a field was
-not found. One invoice gives a one-item array; a statement, a multi-row CSV or
-an email with several attached invoices gives one record per invoice.
+`X-Extraction-Status` is **`inprogress`** (queued or running) or **`extracted`**
+(finished). Nothing else. Every finished extraction has a result:
 
-Plain (`extended` false), for `invoices.csv`, a statement of three invoices:
+- **Clean** (no flags): the plain data, an **array of records** shaped by the data dictionary.
+- **Flagged**: the **extended** form, the same data plus `flagged: true`, `flags`, confidence, per-field sources and metadata. This is exactly what `"extended": true` returns.
+- **Failed outright** (no such file, unknown config, unsupported input, a model outage): a flagged result with `data: []` and `flags: ["error:<code>"]`, plus an `error` object.
+
+`X-Extraction-Flagged` says which form came back, and `X-Job-Id` and
+`X-Audit-Id` identify the run.
+
+Plain, for `invoices.csv` (a statement of three invoices):
 
 ```json
 [
   {"invoice_number": "INV-1001", "invoice_date": "2026-08-01", "due_date": "2026-08-31",
    "vendor": "Acme Corp", "currency": "USD", "total_amount": 1250, "tax_amount": null,
    "po_number": null, "line_items": []},
-  {"invoice_number": "INV-1002", "invoice_date": "2026-08-05", "due_date": "2026-09-04",
-   "vendor": "Globex Ltd", "currency": "USD", "total_amount": 980.4, "tax_amount": null,
-   "po_number": null, "line_items": []},
-  {"invoice_number": "INV-1003", "invoice_date": "2026-08-09", "due_date": "2026-09-08",
-   "vendor": "Initech LLC", "currency": "USD", "total_amount": 3100, "tax_amount": null,
-   "po_number": null, "line_items": []}
+  {"invoice_number": "INV-1002", ...},
+  {"invoice_number": "INV-1003", ...}
 ]
 ```
 
-and for `invoice-email.eml`, a single invoice:
-
-```json
-[
-  {"invoice_number": "INV-20194", "invoice_date": "2026-08-15", "due_date": "2026-09-14",
-   "vendor": "Acme Corp", "currency": "USD", "total_amount": 12400, "tax_amount": 2000,
-   "po_number": "PO-5531",
-   "line_items": [{"description": "Consulting", "quantity": 10, "unit_price": 1000, "amount": 10000},
-                  {"description": "Licence", "quantity": 1, "unit_price": 400, "amount": 400}]}
-]
-```
-
-An input with nothing readable (only images, say) gives `[]` with status `review`.
-
-Every response also carries headers `X-Extraction-Status` (`extracted` or
-`review`) and `X-Audit-Id`, so a plain caller can still tell a confident result
-from one that needs a person. The status is `review` if any record needs review.
-
-Extended (`extended` true) keeps the same array as `data` and adds detail per record:
+Extended (flagged, or asked for):
 
 ```json
 {
-  "data": [ { ...record 1... }, { ...record 2... } ],
+  "data": [ { ...record 1... } ],
   "status": "extracted",
-  "confidence": 0.85,
-  "review_reasons": [],
+  "flagged": true,
+  "confidence": 0.65,
+  "flags": ["missing_field:invoice_number", "low_confidence"],
   "records": [
-    {
-      "data": { ...record 1... },
-      "status": "extracted",
-      "confidence": 0.85,
-      "review_reasons": [],
-      "fields": {
-        "total_amount": {"value": 1250, "confidence": 0.85, "grounding": "verified",
-                         "source": "file:invoices.csv#E2"},
-        "currency": {"value": "USD", "confidence": 0.36, "grounding": "inferred", ...},
-        "line_items": {"value": [...], "confidence": 0.75,
-                       "items": [{"value": {...}, "confidence": 0.75, "source": "..."}]}
-      }
-    }
+    {"data": { ...record 1... }, "flagged": true, "confidence": 0.65,
+     "flags": ["missing_field:invoice_number", "low_confidence"],
+     "fields": {"total_amount": {"value": 10, "confidence": 0.85, "grounding": "verified",
+                                 "source": "file:partial.csv#B2"}, ...}}
   ],
   "metadata": {
-    "audit_id": "run_...",
-    "record_count": 3,
-    "record_key": "invoice_number",
-    "config": {"client": "default", "usecase": "invoice", "version": "1.0.0", "sha256": "...",
-               "resolved_by": {"client": "default", "usecase": "default", "version": "default"}},
+    "audit_id": "run_...", "record_count": 1, "record_key": "invoice_number",
+    "config": {"client": "default", "usecase": "invoice", "version": "1.0.0", "sha256": "...", ...},
     "model": {"provider": "stub", "name": "deterministic-stub"},
     "input": {"file_location": "...", "kind": "csv", "sha256": "...", "subject": null, "sender": null},
-    "documents": [...], "skipped": [...], "graph": {"path": [...]}, "timings_ms": {...}
+    "documents": [...], "skipped": [...], "skills_applied": [...], "keys_used": {...},
+    "cost": {...}, "graph": {"path": [...]}, "timings_ms": {...}
   }
 }
 ```
 
-The top-level `confidence` is the lowest of the records' confidences, and the
-top-level `review_reasons` collect every record's reasons plus run-level ones
-(an unreadable attachment, content that fits no record).
-
-### How records are formed
-
-The data dictionary's `record_key` (`invoice_number` in the sample configs) tells
-records apart:
-
-- **A table with a key column** gives one record per key value. Rows that share a key are one record, and their item columns become its `line_items`.
-- **A label outside such a table** (e.g. "Supplier: Globex Ltd" above it) fills that field in every record of the document, unless the table has its own column for it.
-- **Any other document** is one record. An email body and its attached invoice that share the same key merge into one record.
-- **Content with no key** joins the only record when there is exactly one. With several records, it can't be placed, so the run gets `unplaced_content` and goes to review.
-
-**Sources** name the exact place a value came from: `file:<name>#<locator>`,
-`attachment:<name>#<locator>`, zip members as `file:bundle.zip/statement.csv#D2`,
-and `body#L4` or `body#subject` for the email itself. Locators: CSV `B14`; Excel
-`Sheet!B14`; PDF `p1:L4` (line) or `p1:T1:R2C3` (table cell).
-
-**Review reasons**: `missing_field:<name>`, `unplaced_content`, `unverified_value:<name>`,
+**Flags**: `missing_field:<name>`, `unverified_value:<name>`,
 `schema_validation_failed:<name>`, `critical_field_conflict:<name>`,
-`low_confidence`, `attachment_parse_failed:<file>`, `encrypted_no_key`,
-`unsupported_attachment:<kind>`, `archive_limit_exceeded:<zip>`,
-`archive_encrypted:<zip>`, `embedded_email_not_supported`, `no_readable_content`.
+`low_confidence`, `unplaced_content`, `no_readable_content`,
+`attachment_parse_failed:<file>`, `encrypted_no_key`, `unsupported_attachment:<kind>`,
+`archive_limit_exceeded:<zip>`, `embedded_depth_exceeded`, `agent_timeout:parse:<file>`,
+`agent_timeout:run`, `cost_ceiling_exceeded`, `ingestion_rule_error`,
+`input_ignored:<rule>`, `error:<code>`, `dead_lettered`.
 
-**Errors** are JSON `{"error", "message", "detail"}`: `location_outside_input_root`
-(400), `file_not_found` (404), `malformed_email` (422), `config_not_found` (404), `config_ambiguous` (400),
-`input_too_large` (413), `unsupported_input:<kind>` (422), `model_unavailable`
-(503), `model_failed` (502).
+## Delivery: now, webhook, or polling
+
+| Request | Response | Then |
+| --- | --- | --- |
+| `{"file_location": ...}` | `200`, the result | nothing |
+| `+ "callback_url": "https://erp/hook"` | `202 {"job_id", "status": "inprogress"}` | the result is POSTed to the URL |
+| `+ "async": true` | `202 {"job_id", "status": "inprogress", "poll": "/extractions/<id>"}` | `GET` it until `extracted` |
+
+Every extraction is a job in a durable SQLite queue under `STATE_DIR` (RT-49).
+Workers in the API process (`WORKERS`, default 2), plus any number of
+`python -m extractor_service.worker` processes on the same volume, claim jobs
+with a lease.
+
+**The webhook** receives:
+
+```json
+{"event": "extraction.completed", "job_id": "job_...", "status": "extracted", "flagged": false,
+ "human_corrected": false, "audit_id": "run_...",
+ "request": {"file_location": "...", "idempotency_key": "..."},
+ "result": [ ...plain data, or the extended object when flagged... ]}
+```
+
+Headers: `X-Extraction-Status: extracted`, `X-Job-Id`, `X-Event`, `X-Timestamp`
+and, with `WEBHOOK_SECRET` set, `X-Signature: sha256=<HMAC-SHA256 of "<X-Timestamp>.<body>">`.
+
+- **Retries:** a non-2xx answer or a network error is retried with exponential backoff, up to `WEBHOOK_MAX_ATTEMPTS`. After that the delivery is marked failed and `POST /extractions/{id}/redeliver` sends it again.
+- **Events:** a correction is delivered as `extraction.corrected`, with the same `audit_id` and `human_corrected: true`. A rejection is delivered as `extraction.rejected`.
+- **Callback safety:** callback URLs must be http(s). Link-local and cloud-metadata addresses are refused, and `WEBHOOK_ALLOWED_HOSTS` restricts hosts to an allowlist.
+
+**Idempotency (RT-04).**
+- A job is keyed by `idempotency_key`, or by the input's SHA-256 together with the resolved config.
+- Within `DEDUPE_WINDOW_DAYS` the same key returns the same job and `audit_id`, not a new extraction.
+
+**Faults.**
+- An engine fault is retried with backoff.
+- After `JOB_MAX_ATTEMPTS` the job is dead-lettered (RT-56). It still ends in a result flagged `error:internal_error` and `dead_lettered`, and that result is delivered.
+
+**Resume (RT-40).**
+- Every graph node is a LangGraph checkpoint (SQLite, under `STATE_DIR`), and a job's thread is its job id.
+- When a worker dies mid-run, the lease expires, another worker claims the job, and the run continues from its last checkpoint. Nothing already parsed is parsed again.
+- Checkpoint deserialization accepts only the run state's own types.
+
+## Ingestion filter
+
+Attachments, zip members, attached emails, and the input file itself are
+checked against lookup data **before anything is parsed**. An ignored item is
+never read and never reaches the model. It is listed in `metadata.skipped` with
+the rule that matched, and it raises no flag. An ignored input file gives an
+empty result flagged `input_ignored:<rule>`.
+
+Lookup data lives in `configs/lookups/` (every config) and
+`configs/<client>/<usecase>/<version>/lookups/` (one config):
+
+```json
+// ingestion.json
+{
+  "ignore_names":  ["docusign", "*.ics", "re:^certificate of completion"],
+  "ignore_hashes": ["<sha256 hex>", "md5:<md5 hex>"],
+  "ignore_kinds":  ["image"]
+}
+```
+
+A name entry matches the file name case-insensitively:
+- plain text matches anywhere in the name, so `docusign` ignores `Summary_DocuSign.pdf`;
+- an entry with `*`, `?` or `[` is a glob over the whole name;
+- `re:` starts a regular expression.
+
+Anything richer goes in `ingestion.decision.json`, a ZEN engine decision (JDM, as
+the ZEN editor exports it). It is evaluated for each item with `name`, `path`,
+`extension`, `kind`, `size`, `sha256`, `md5`, `container` (file, email, zip or
+embedded), `depth`, `sender`, `sender_domain`, `subject`, `client` and `usecase`,
+and returns `{"action": "ignore" | "keep", "rule": "..."}`.
+
+The first rule that says ignore wins. A decision that errors keeps the item
+and flags `ingestion_rule_error`, so a broken rule never silently drops a
+document. Malformed lookup data is a config problem reported by `/health`.
+
+## What gets read
+
+- **Email threads.** The body is split into messages, newest first (RT-12): reply and forward markers, Outlook header blocks, `On … wrote:` lines and quoted runs. Each body line records its `segment`, and older messages count for less, so a corrected figure in the latest reply beats the quoted original.
+- **Attached emails** (`.eml`, `.msg`, Outlook items, and message parts) are read recursively as `embedded:<n>:<name>` sources, with their bodies and attachments. The depth is checked before recursing (`intake.max_email_depth`, default 3; RT-18, RT-36).
+- **Encrypted attachments.** PDFs, Office files and ZipCrypto zip members are opened with keys found in the email they came with: "password: …", "the pwd is …", newest message first (RT-15). Nothing is brute-forced. `metadata.keys_used` records where each working key was found (e.g. `body#L2`), never the key. With no working key the item is flagged `encrypted_no_key` and the run carries on.
+- **DOCX** paragraphs (`P12`) and tables (`T2:R3C4`). Legacy `.doc` is flagged as unsupported.
+- **OCR.** PDF pages without a text layer are rendered and read by tesseract (`p2:O3` locators). Only those pages are OCR'd, and each page notes `page_source:pN=pdf_text|ocr` (RT-16). OCR'd values are weighted by the engine's confidence. Images are OCR'd only when a config sets `intake.ocr_images: true`. Without tesseract, such pages stay flagged.
+- **Zips** are unpacked within limits (members, size, compression ratio, depth).
+
+Each item is parsed in its own LangGraph branch (`Send`), so items run in parallel,
+bounded by `concurrency.max_parallel` (RT-41). Each runs in a **sandboxed child
+process** with a time budget (`evidence.parse_timeout_s`) and an address-space
+cap (`SANDBOX_MEMORY_MB`) (RT-39, RT-65). A crash or overrun is a flagged,
+failed document (`agent_timeout:parse:<name>`), never a hung run. Network
+isolation of the parser is left to the deployment (a container without
+egress).
+
+Item bytes are spooled once per run and referenced from the run state, so
+checkpoints stay small (RT-34). With `STATE_KEY` (a Fernet key) the spool is
+encrypted at rest, and the retention sweep deletes it after the run (RT-35, RT-51).
+
+## Pipeline
+
+```
+START -> resolve_config -> ingest --(one Send per item)--> parse_item (parallel, sandboxed)
+                                 \--(no items)----------------\
+      -> assemble -> (readable?) extract -> verify -> route -> END
+```
+
+| Node | Does |
+| --- | --- |
+| `resolve_config` | Picks the config folder; decides the model provider and name |
+| `ingest` | Checks the location, applies the ingestion filter, unpacks emails, zips and encrypted files, spools bytes |
+| `parse_item` | One branch per item: CSV, Excel, PDF (+OCR), DOCX, email body (+threads), in the sandbox |
+| `assemble` | The single join (RT-09): numbers documents, picks the skills whose fingerprint matches |
+| `extract` | The stub or the model through the gateway; run and cost ceilings; a model failure becomes a flag |
+| `verify` | Grounds every value in the evidence, validates types, scores confidence |
+| `route` | Flags per record and for the run, in rule order, all of them (RT-43) |
+
+`metadata.graph` and `metadata.timings_ms` hold the path and each node's time
+(one entry per parsed item). `GET /graph` draws it as Mermaid text.
 
 ## Configs
 
 ```
 configs/
   defaults.json                        {"client": "default", "usecase": "invoice", "version": "1.0.0"}
+  lookups/                             ingestion filter for every config (optional)
   <client>/<usecase>/<version>/
-    manifest.json                      model, skills order, thresholds, evidence size, output format
+    manifest.json                      model, skills, thresholds, evidence, intake, limits, output
     schema.json                        the data dictionary
     prompts/system.md                  system prompt
-    skills/<name>.md                   one per skill, used in the order manifest.json lists them
+    skills/<name>.md                   one per skill, in manifest order
+    lookups/                           ingestion filter for this config (optional)
 ```
-
-**Skill hints.** A skill may open with YAML front matter. Its `hints` are
-machine-readable and are folded into the data dictionary when the config loads,
-so every extractor uses them, the stub included; the model sees only the
-markdown body. Design-time writes these when it learns a document pattern
-(`kind: learned-pattern`), but a hand-written skill can carry them too.
-
-```markdown
----
-name: hooli-remittance
-kind: learned-pattern
-hints:
-  fields:
-    invoice_number: {labels: ["Our Ref"]}           # labels become aliases
-    total_amount: {anchors: ["kindly remit"]}       # value follows this phrase, anywhere in a line
-    line_items:
-      items: {description: {labels: ["Service"]}}  # a line-item column header
----
-## Skill: hooli-remittance pattern
-...
-```
-
-A hint for a field the dictionary lacks, an unknown hint key, or front matter
-that is not YAML makes the config fail to load (`config_invalid`).
 
 Each part the request leaves out is filled in like this:
 
 | Missing | Taken from |
 | --- | --- |
 | `client` | `defaults.json` |
-| `usecase` | `defaults.json` when the client is the default client; otherwise the client's only use case (more than one is an error) |
-| `version` | `defaults.json` when client and use case are the defaults; otherwise the highest version (`1.10.0` beats `1.9.0`) |
+| `usecase` | `defaults.json` when the client is the default client; otherwise the client's only use case |
+| `version` | `defaults.json` when client and use case are the defaults; otherwise the highest version |
 
-The response's `metadata.config.resolved_by` says which rule chose each part, and
-`sha256` fingerprints every file in the folder. Treat a published version folder
-as read-only: change it by adding a new version.
+Treat a published version folder as read-only: change it by adding a new version.
+
+`manifest.json` sections beyond the model and skills:
+
+| Section | Keys (defaults) |
+| --- | --- |
+| `thresholds` | `accept_at` (0.8) |
+| `evidence` | `rows` (200), `tail_rows` (10), `pages` (10), `tail_pages` (1), `max_sheets` (5), `max_chars_per_document` (60000), `ocr` (true), `ocr_timeout_s` (60), `parse_timeout_s` (120) |
+| `intake` | `max_zip_members` (200), `max_zip_uncompressed_mb` (200), `max_compression_ratio` (100), `max_zip_depth` (1), `max_email_depth` (3), `ocr_images` (false) |
+| `limits` | `run_ceiling_s` (300, RT-60), `max_cost_usd` (none, RT-62) |
+| `concurrency` | `max_parallel` (4, RT-41) |
+| `output` | `decimal_format`: `number` or `string` |
+| `locale` | `date_order`: `DMY`, `MDY` or `YMD` |
+
+### Skills, hints and fingerprints
+
+A skill is markdown for the model. It may open with YAML front matter whose
+`hints` are machine-readable. They are folded into the data dictionary, so every
+extractor uses them, the stub included; the model reads only the body.
+Design-time writes these when it learns a pattern (`kind: learned-pattern`).
+
+```markdown
+---
+name: hooli-remittance
+kind: learned-pattern
+applies_to:                                       # this pattern's fingerprint
+  headers: [Our Ref, Bill Date, Biller]
+  min_header_share: 0.6
+hints:
+  fields:
+    invoice_number: {labels: ["Our Ref"]}         # labels become aliases
+    total_amount: {anchors: ["kindly remit"]}     # value follows this phrase, anywhere in a line
+    line_items:
+      items: {description: {labels: ["Service"]}}
+---
+## Skill: hooli-remittance pattern
+...
+```
+
+`applies_to` scopes a skill to documents that look like its pattern:
+`sender_domains`, `file_names` (globs), `headers` (with `min_header_share`) or
+`texts`. One criterion matching is enough. Skills without it apply everywhere.
+`metadata.skills_applied` lists what a run used. Bad hints or fingerprints make
+the config fail to load (`config_invalid`).
 
 ### Data dictionary (`schema.json`)
 
@@ -230,83 +327,35 @@ as read-only: change it by adding a new version.
 ]}
 ```
 
-`record_key` names the field that tells records apart. It defaults to the first
-required string field.
-
 Types: `string`, `integer`, `decimal`, `date` (output `YYYY-MM-DD`), `boolean`,
-`enum` (with `values`), `array` of objects. `required` fields missing send the
-run to review; `critical` fields that disagree across documents do too.
-`grounding: optional` lets a value be inferred rather than read, such as `USD`
-from a `$` sign. `manifest.json`'s `output.decimal_format` is `number` (default)
-or `string` (exact text such as `"12400.5"`).
+`enum` (with `values`), `array` of objects. A field may also carry `anchors`
+(phrases its value follows). `record_key` tells records apart: a table with a
+key column gives one record per key, and sources sharing a key merge into one
+record.
 
-### Batch runs from the command line
+## Models, the gateway, and cost
 
-`python -m extractor_service.cli` reads `{"runs": [{"file_location", "client"?,
-"usecase"?, "version"?}], "include_evidence"?: bool}` on stdin and writes each run's
-extended output (plus its config, data dictionary, skills and, when asked, its
-evidence blocks) as JSON on stdout. Settings come from the same environment
-variables as the service. Design-time uses it to run this engine in isolation
-when it learns a pattern.
-
-### Pipeline
-
-The extraction runs as a LangGraph state graph (`extractor_service/graph.py`):
-
-```
-START -> resolve_config -> read_input -> build_evidence --(readable)--> extract -> verify -> route -> END
-                                                       \--(nothing readable)-----------^
-```
-
-| Node | Does |
-| --- | --- |
-| `resolve_config` | Picks the config folder; decides the model provider and name |
-| `read_input` | Checks the file location, detects the kind, unpacks email and zip, sets the audit id |
-| `build_evidence` | Runs the CSV, Excel and PDF readers into cited lines |
-| `extract` | Calls the extractor: the stub, or the model through the gateway. Skipped when nothing is readable |
-| `verify` | Checks every value against the evidence, validates types, scores confidence |
-| `route` | Overall confidence, review reasons, status |
-
-The path a run took and each node's time are in `metadata.graph` and
-`metadata.timings_ms`. `GET /graph` returns the graph as Mermaid text.
-
-### Models and the model gateway
-
-`manifest.json`'s `model.provider` picks the extractor:
-
-| Provider | What runs |
-| --- | --- |
-| `stub` | Deterministic label and column matching from the dictionary's aliases. No model call; offline; used by the default config and the tests. |
-| `gateway` | A model reached through the gateway. `model.name` is an alias (`default` when omitted) that the gateway resolves to a model. |
-
-```json
-"model": {"provider": "gateway", "name": "default", "max_tokens": 4096}
-```
+`manifest.json`'s `model.provider` is `stub` (deterministic label and column
+matching; offline) or `gateway` (a model reached through the gateway; `model.name`
+is an alias such as `default`).
 
 Every model call goes through one function, `call_model(ModelRequest) ->
-ModelResponse`, in `extractor_service/gateway.py`. That file is the only place
-that knows which vendor and models sit behind the gateway, how aliases map to
-model ids, and what the wire protocol looks like. Everything else passes a
-neutral request: a model alias, a system prompt, messages, tool specs whose
-parameters are JSON Schema, and the tool the model must call.
+ModelResponse`, in `extractor_service/gateway.py`. It is the only code that knows
+the vendor, the model ids and the wire protocol. Everything else passes a neutral
+request (alias, system prompt, messages, tool specs as JSON Schema, the tool the
+model must call).
 
-- **Headers:** each request carries `X-Request-Id` (the run's audit id), `X-Client-Id`, `X-Usecase`, `X-Config-Version` and `X-Model-Alias`, so gateway logs join to audit records.
-- **Retries:** rate limits, server errors, timeouts and connection failures are retried with backoff (2 extra attempts by default).
-- **Errors:** refused credentials fail at once as `model_unavailable`; a rejected request fails at once as `model_failed`.
-- **Recorded:** the model id that answered, token usage, the gateway's request id and latency go into `metadata.model.call`.
+The gateway handles four things:
+- **Retries:** transient failures are retried with backoff.
+- **Request headers:** `X-Request-Id`, `X-Client-Id`, `X-Usecase` and `X-Config-Version` join gateway logs to audit records.
+- **Errors:** a failed call becomes the flag `error:model_unavailable` or `error:model_failed` on a result; it is never an HTTP error.
+- **Cost (RT-62):** with `MODEL_GATEWAY_PRICES` set (USD per million tokens, by alias or model id), each run reports `metadata.cost.model_usd`. A run whose projected cost exceeds the config's `limits.max_cost_usd` skips the model call and is flagged `cost_ceiling_exceeded`.
 
-To use a different gateway or vendor, replace `call_model`, or pass your own
-function to `create_app(model_gateway=...)`. The contract is the dataclasses in
-`gateway.py`, and its module docstring documents the default implementation's
-endpoint and settings. The model must answer through the `record_extraction`
-tool, whose schema is generated from the data dictionary, at temperature 0.
 `MODEL_PROVIDER=stub` forces every config onto the stub.
 
 ### How confidence works
 
-Every value is checked against the evidence before it is returned:
-
-| Check | Effect on the model's confidence |
+| Check | Effect on the value's confidence |
 | --- | --- |
 | Found at the cited cell or line (`verified`) | × 1.0 |
 | Found elsewhere; source corrected (`relocated`) | × 0.8 |
@@ -314,10 +363,25 @@ Every value is checked against the evidence before it is returned:
 | Not found, field requires grounding | value dropped, `unverified_value:<field>` |
 | Breaks its type, pattern or values | × 0.5, `schema_validation_failed:<field>` |
 | Another source holds the same value | + 0.05 |
+| Older message in a thread / OCR'd text | lower starting score |
 
-Overall confidence is the lowest among required fields. The run is `extracted`
-when there are no review reasons and overall confidence reaches
-`thresholds.accept_at`; otherwise `review`, with the partial data still returned.
+A record's confidence is the lowest among its required fields. Below
+`thresholds.accept_at` it is flagged `low_confidence`.
+
+## Review, audit and metrics
+
+- **Review queue (RT-44..48).** Every flagged result opens an entry (`GET /review`). `POST /review/{job_id}/resolve` takes `{"reviewer", "corrections": [{"record", "field", "value"}]}`, or `"records"` to replace them, or `"action": "reject"`. Each change is logged with the original and corrected value, who made it, and when. The corrected result keeps the `audit_id`, is marked `human_corrected` and is delivered again. `GET /review/corrections/export` returns corrected results as ground truth for design-time learning (`POST /learning/corrections`).
+- **Audit.** Every run writes its extended result to `AUDIT_DIR` (RT-06), failures included. Every completed, corrected or rejected result is appended to a SHA-256 hash chain. `GET /audit/verify` checks every link, and that each stored result is the one last chained.
+- **Metrics (RT-54).** `GET /metrics` reports, per client and use case: jobs, in progress, flagged and flag rate, corrections, dead letters, p50/p95 latency, cost, and the most common flags. `GET /metrics/prometheus` gives the same in Prometheus text format.
+- **Retention.** A sweep deletes finished jobs' spools and checkpoints, and purges results older than `RETENTION_DAYS` whose review is closed.
+
+## Batch runs from the command line
+
+`python -m extractor_service.cli` reads `{"runs": [{"file_location", "client"?,
+"usecase"?, "version"?}], "include_evidence"?: bool}` on stdin. It writes each
+run's extended result, plus its config, dictionary, skills and (when asked)
+evidence blocks, as JSON on stdout. Design-time uses it to run this engine in
+isolation when it learns a pattern.
 
 ## Environment
 
@@ -326,22 +390,30 @@ when there are no review reasons and overall confidence reaches
 | `CONFIG_ROOT` | `/app/configs` | Config folders |
 | `INPUT_ROOT` | `/data` | Only files under this folder can be read |
 | `AUDIT_DIR` | `/audit` | One JSON audit record per run; unset to disable |
+| `STATE_DIR` | `/state` | Job queue, checkpoints, spool, audit chain |
+| `STATE_KEY` | unset | Fernet key: encrypts spooled attachments at rest |
+| `WORKERS` | `2` | Queue workers inside the API process (0 = none) |
+| `JOB_MAX_ATTEMPTS`, `JOB_RETRY_BACKOFF_S`, `JOB_LEASE_S` | `3`, `2`, `420` | Engine-fault retries; how long a worker owns a job |
+| `DEDUPE_WINDOW_DAYS` | `7` | Idempotency window |
+| `WEBHOOK_SECRET` | unset | Signs deliveries (HMAC-SHA256) |
+| `WEBHOOK_MAX_ATTEMPTS`, `WEBHOOK_BACKOFF_S`, `WEBHOOK_TIMEOUT_S` | `8`, `5`, `15` | Delivery retries |
+| `WEBHOOK_ALLOWED_HOSTS` | unset | Comma-separated callback host allowlist |
+| `PARSE_SANDBOX` | `process` | `off` parses in-process (no fork on the platform, debugging) |
+| `SANDBOX_MEMORY_MB` | `1024` | Address space a parse may add |
+| `RETENTION_DAYS` | `90` | Finished results kept this long |
 | `MAX_FILE_MB` | `25` | Largest input file |
 | `MODEL_PROVIDER` | unset | Force a provider for every config, e.g. `stub` |
-| `MODEL_GATEWAY_URL` | unset | Base URL of the model gateway |
-| `MODEL_GATEWAY_TOKEN` | unset | Gateway credential |
-| `MODEL_GATEWAY_AUTH_HEADER` | `Authorization` | `Authorization` sends `Bearer <token>`; any other header name sends the token as is |
-| `MODEL_GATEWAY_MODELS` | unset | JSON map of aliases to model ids, overriding the gateway's built-in map |
-| `MODEL_GATEWAY_TIMEOUT_S` | `120` | Per attempt |
-| `MODEL_GATEWAY_RETRIES` | `2` | Extra attempts on transient failures |
+| `MODEL_GATEWAY_URL`, `MODEL_GATEWAY_TOKEN` | unset | The model gateway and its credential |
+| `MODEL_GATEWAY_AUTH_HEADER` | `Authorization` | `Authorization` sends `Bearer <token>`; any other name sends the token as is |
+| `MODEL_GATEWAY_MODELS` | unset | JSON map of aliases to model ids |
+| `MODEL_GATEWAY_PRICES` | unset | JSON prices per million tokens, for cost reporting and ceilings |
+| `MODEL_GATEWAY_TIMEOUT_S`, `MODEL_GATEWAY_RETRIES` | `120`, `2` | Per attempt; extra attempts on transient failures |
 
 ## Limits worth knowing
 
-- **Outlook `.msg` files are read with a built-in reader**, using `olefile` (BSD) and `compressed-rtf` (MIT). The GPL-licensed `extract-msg` is deliberately not used. The reader takes the subject, the sender, and the body: plain text first, then HTML, then RTF (including Outlook's HTML-in-RTF bodies). It also takes every attachment stored by value.
-- **Some `.msg` attachments are not opened.** An attached Outlook item is flagged as an attached email, the same as with `.eml`. Attachments stored only as a link (`attachment_by_reference`) are skipped.
-- **The `.msg` tests use synthetic files.** They are built to the published format, because no permissively licensed real samples exist. Run a few real Outlook exports through `/extract` before relying on it.
-- **Images are skipped.** This includes scanned PDFs with no text layer, which end in review.
-- **Zip unpacking is capped.** One level of nested zip is allowed. The defaults are 200 members, 200 MB unpacked and a 100:1 compression ratio, all adjustable in `manifest.json` under `intake`.
-- **The stub finds only what the aliases and skill hints name.** Real documents need a model through the gateway; design-time's pattern learning adds hints for the layouts it has seen.
-- **No checkpointing yet.** The graph runs without a LangGraph checkpointer, so an interrupted run starts again rather than resuming. RT-40 needs a durable checkpointer, plus a serialisable run state.
-- **Evidence is paged.** By default the model sees 200 rows per sheet plus the last 10, and 10 PDF pages plus the last one. Larger files are truncated, and this is noted in `metadata.documents[].notes`.
+- **One machine, or one shared volume.** The queue and checkpoints are SQLite on `STATE_DIR`. Many processes on one host (or containers sharing a local volume) scale fine. Across hosts, they need a shared filesystem with working locks, or a managed queue swapped in behind `jobs.py`.
+- **The parser sandbox caps time and memory, not network.** Run the image without egress to complete RT-65.
+- **OCR needs tesseract**, which the image installs. English only by default; add tesseract language packs for others.
+- **`.msg` is read with olefile (BSD) and compressed-rtf (MIT), not the GPL `extract-msg`.** The tests use synthetic files built to the published format; run a few real Outlook exports through before relying on it.
+- **The stub finds only what the aliases and skill hints name.** Real documents need a model through the gateway; design-time pattern learning adds hints for the layouts it has seen.
+- **Encrypted zips:** ZipCrypto members open with a key from the email; AES-encrypted members do not (Python's zipfile cannot read them), so they flag `encrypted_no_key`.

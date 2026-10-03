@@ -19,7 +19,7 @@ document that asked for it.
 
 ```bash
 cp .env.example .env
-docker compose up --build          # Postgres 16 + migrations + API on :8000, runtime on :8001
+docker compose up --build          # Postgres 16 + migrations + API on :8000, runtime on :8001 (+ a worker)
 open http://localhost:8000/docs    # OpenAPI: every component, typed
 ```
 
@@ -67,7 +67,9 @@ curl -sX POST localhost:8000/agents/corpus-profiler/run \
 | Pattern Skill Writer | `POST /agents/pattern-skill-writer/run` | pattern learning |
 | Registry | `/registry/...` | CTR-01 … CTR-05, CTR-17 … CTR-22 |
 | Authoring run | `POST /runs` | DT-01 … DT-05 |
-| Pattern learning | `POST /learning/runs`, `GET /learning/runs[/{id}]` | see below |
+| Pattern learning | `POST /learning/runs`, `POST /learning/runs/{id}/resume`, `GET /learning/runs[/{id}]` | see below |
+| Learning from corrections | `POST /learning/corrections` | runtime RT-46, DT-39 |
+| Learning memory | `GET /learning/memory`, `DELETE /learning/memory/rejected-hints` | see below |
 
 ## Pattern learning
 
@@ -94,7 +96,8 @@ curl -sX POST localhost:8000/learning/runs -H 'content-type: application/json' -
 | `object` | the data object the pattern produces (the dictionary's `name`); checked |
 | `ground_truth` | optional: the expected record(s) for this source |
 | `reference_text` | optional: notes on the pattern, e.g. `invoice_number: "Our Ref"` |
-| `max_iterations`, `publish`, `strict` | attempts (default 3), dry run, review-status strictness |
+| `max_iterations`, `publish`, `strict` | attempts (default 3), dry run, whether flags fail a ground-truth run |
+| `scope` | `pattern` (default): the skill applies only to documents matching the sample's fingerprint; `global`: to every document |
 
 The loop is a LangGraph graph (`learning/graph.py`):
 
@@ -113,9 +116,9 @@ test_candidate --passes, no regressions--> publish -> finish
   touches the live configs until `publish`.
 - **Did it fail?** With ground truth, the Extraction Judge compares every field
   it names, record by record (paired on the dictionary's `record_key`), plus any
-  review status when `strict` (the default). Without ground truth, *any* review
-  reason fails: a missing required field, an unverified value, low confidence,
-  unplaced content.
+  runtime flag when `strict` (the default). Without ground truth, *any* flag
+  fails: a missing required field, an unverified value, low confidence,
+  unplaced content, an attachment that could not be read.
 - **The skill.** The Pattern Skill Writer finds each failing field's expected
   value in the runtime's evidence and reads where it sits: the text before it in
   a cell or line is a **label** (`Our Ref: RA-501`), a phrase before it
@@ -133,6 +136,11 @@ test_candidate --passes, no regressions--> publish -> finish
   (1.0.0 -> 1.0.1), with the skill added to `manifest.json`'s `skills` and
   `learned_patterns`. Published versions are never edited; learning on top of a
   learned version carries its hints forward (1.0.1 -> 1.0.2).
+- **Fingerprints.** A pattern's skill carries `applies_to`: the sender's domain,
+  the sample's table headers, or failing both a short title line. The runtime
+  then uses its hints and body only on documents that look like that pattern, so
+  one layout's labels and anchors cannot misread another's. An existing
+  fingerprint is kept and extended when the pattern is learned again.
 - **Regressions.** Earlier samples of the same client and use case whose last run
   passed are re-run against every candidate. A candidate that breaks one is
   rejected, however much it helps the new sample.
@@ -140,6 +148,40 @@ test_candidate --passes, no regressions--> publish -> finish
   `improved` (better, still failing; published so a later sample can build on
   it), `failed` (no candidate beat the base; nothing written). Every call is a
   row in `learning_runs`, with both verdicts, every attempt and the skill.
+
+### Memory
+
+Learning keeps what it has learned between calls in LangGraph's long-term store
+(`PostgresStore`, on the registry database; `learning/memory.py`), per client and
+use case:
+
+| Namespace | Holds | Used for |
+| --- | --- | --- |
+| `rejected_hints` | hints whose candidate broke an earlier sample, with why | the writer never proposes them again (`avoided:` notes) |
+| `patterns` | each pattern's fingerprint, samples, outcomes and versions | keeping a pattern's fingerprint across samples |
+| `corrections` | runtime corrections already learned from | importing corrections idempotently |
+
+`GET /learning/memory?client=&usecase=` shows it all.
+`DELETE /learning/memory/rejected-hints?...&key=` forgets one rejected hint.
+
+**Resumable calls.** Every node of the learning graph is checkpointed
+(`PostgresSaver`). The call is recorded as `running` before the graph starts. If
+the process dies, the record stays `running`, or becomes `interrupted` on an
+engine error. `POST /learning/runs/{id}/resume` carries on from the last node,
+with nothing before it re-run. The scratch configs live under
+`LEARNING_STATE_DIR` until a call finishes.
+
+**Corrections as ground truth.** `POST /learning/corrections` takes the runtime's
+`GET /review/corrections/export` items, or fetches them from `runtime_url` /
+`RUNTIME_URL`. Each corrected result is learned like any sample with ground
+truth: the pattern is named after the sender's domain unless one is given, and
+the call is recorded as requested by `review:<reviewer>`. Re-importing the same
+corrections is a no-op. The source files must be readable at the same
+`file_location` under `LEARNING_INPUT_ROOT` (compose mounts the same `/data`).
+
+LangGraph's store and checkpointer manage their own tables (`store`,
+`checkpoints`, ...) with their own migrations, run on first use. Alembic manages
+the registry tables.
 
 `defaults.json` in the runtime configs still pins the version the *default*
 config serves; move it when a learned default version should go live. Client
@@ -190,7 +232,7 @@ src/dataextractor_designtime/
   contracts/       PRD 1 as records, validated on both sides of the seam
   registry/        Postgres tables, semver rules, publish / sign-off / promote
   agents/          the design agents, the judge and pattern skill writer, file-type and tabular tools
-  learning/        the pattern-learning graph, isolated runtime, config versions, run store
+  learning/        the pattern-learning graph, isolated runtime, config versions, run store, memory
   engine/          reference runtime engine the evaluation harness replays
   model/           the ModelClient seam, its deterministic stub, and the gateway client
   api/             one router per component; typed.py reads bodies and publishes schemas
@@ -207,16 +249,18 @@ tests/             run against a live Postgres (learning tests also run the real
   extraction, merge, completeness, confidence, flag routing). The real engine is
   PRD 3's build. Today's metrics describe this engine, not production; the
   class interface is the swap point.
-- **Phase 1 attachment types only:** CSV and XLSX. PDF, DOC, OCR, encrypted
-  attachments and embedded email flag rather than parse.
+- **The reference engine is Phase 1 only:** CSV and XLSX. The authoring run's
+  evaluation harness replays it; pattern learning instead runs the real runtime,
+  which reads PDF (with OCR), DOCX, encrypted attachments and embedded email.
 - **Stubbed judgment.** Alias grouping, term weighting, criticality proposal,
   band choice and skill-body authoring are rules, not model calls. Defensible
   and deterministic, not clever.
 - **No review surface.** Proposals come back as JSON with their evidence;
   DT-32's accept/edit/reject UI is not built.
-- **Learned hints apply to the whole config version.** A pattern's labels and
-  anchors are not scoped to documents of that pattern; the regression set is
-  what guards other patterns. Pattern detection would scope them.
+- **Fingerprints are heuristic.** A pattern is recognised by its sender domain,
+  table headers or a title line. Two layouts with the same headers from the same
+  sender share a fingerprint; `scope: global` skills apply everywhere, and the
+  regression set is what guards them.
 - **No UAT / production split.** One registry, one channel; promotion sets state
   and activation rather than copying between AWS accounts.
 
@@ -228,6 +272,8 @@ TEST_DATABASE_URL=postgresql+psycopg2://designtime:designtime@localhost:5432/des
   python -m pytest -q
 ```
 
-The suite drops and recreates the schema per test, so point it at a database it
-is allowed to own. `tests/test_registry.py` and `tests/test_api.py` exercise
-real Postgres; the rest are pure.
+The suite drops and recreates the schema (and LangGraph's store and checkpoint
+tables) per test, so point it at a database it is allowed to own.
+`tests/test_registry.py`, `tests/test_api.py` and `tests/test_learning.py`
+exercise real Postgres; the learning tests also run the real runtime from
+`../runtime` in a child process (its requirements must be installed).

@@ -30,7 +30,6 @@ from typing import Any
 
 from . import pipeline
 from .config_store import ConfigStore
-from .errors import ModelError, ServiceError
 from .graph import build_graph
 
 MAX_BLOCKS_PER_DOC = 5000
@@ -44,7 +43,9 @@ def evidence_of(docs: list[Any]) -> list[dict[str, Any]]:
             "doc_id": d.doc_id, "source": d.source, "name": d.name, "kind": d.kind, "status": d.status,
             "truncated": len(d.blocks) > MAX_BLOCKS_PER_DOC,
             "blocks": [{"locator": b.locator, "text": b.text, "vtype": b.vtype, "group": b.group,
-                        "row": b.row, "col": b.col} for b in blocks],
+                        "row": b.row, "col": b.col,
+                        **({"segment": b.segment} if b.segment is not None else {}),
+                        **({"confidence": b.confidence} if b.confidence is not None else {})} for b in blocks],
             "tables": [{"group": t.group, "header": [b.locator for b in t.header],
                         "rows": [[b.locator for b in row] for row in t.rows]} for t in d.tables],
         })
@@ -57,15 +58,13 @@ def run_batch(request: dict[str, Any], settings: pipeline.Settings | None = None
     graph = build_graph(ConfigStore(settings.config_root), settings, model_gateway)
     results = []
     for r in request.get("runs") or []:
-        try:
-            out = pipeline.run(graph, settings, file_location=r["file_location"], client=r.get("client"),
-                               usecase=r.get("usecase"), version=r.get("version"))
-        except ServiceError as exc:
-            results.append({"ok": False, "error": {**exc.to_dict(), "status": exc.status}})
-            continue
-        except ModelError as exc:
-            results.append({"ok": False, "error": {"error": exc.code, "message": str(exc),
-                                                   "detail": {"transient": exc.transient}, "status": 502}})
+        out = pipeline.run(graph, settings, file_location=r["file_location"], client=r.get("client"),
+                           usecase=r.get("usecase"), version=r.get("version"))
+        err = out.extended.get("error")
+        if err:
+            results.append({"ok": False, "error": {"error": err["code"], "message": err["message"],
+                                                   "detail": err.get("detail") or {}, "status": err.get("status", 500)},
+                            "output": out.extended})
             continue
         res = {"ok": True, "output": out.extended, "config": out.cfg.ref(),
                "dictionary": out.cfg.dictionary.describe(), "skills": [s.name for s in out.cfg.skills]}

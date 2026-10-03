@@ -18,6 +18,57 @@ Outcome = Literal["passed", "learned", "improved", "failed"]
 
 
 @dataclass(kw_only=True)
+class CorrectionItem(Record):
+    """One corrected result, as the runtime's GET /review/corrections/export gives it."""
+
+    job_id: str
+    file_location: str
+    ground_truth: list[dict[str, Any]]
+    client: str | None = None
+    usecase: str | None = None
+    audit_id: str | None = None
+    config_version: str | None = None
+    source_sha256: str | None = None
+    sender: str | None = None
+    subject: str | None = None
+    corrected_fields: list[dict[str, Any]] = field(default_factory=list)
+    reviewer: str | None = None
+    corrected_at: float | None = None
+
+
+@dataclass(kw_only=True)
+class CorrectionsRequest(Record):
+    """Learn from reviewer corrections: each corrected result is a sample with ground truth."""
+
+    #: The export's items; or leave empty and give ``runtime_url`` to fetch them.
+    items: list[CorrectionItem] = field(default_factory=list)
+    runtime_url: str | None = None
+    client: str | None = None
+    usecase: str | None = None
+    #: Pattern name for every item; default: from the sender's domain, else the file name.
+    pattern_name: str | None = None
+    publish: bool = True
+    max_iterations: int | None = None
+    scope: Literal["pattern", "global"] = "pattern"
+
+
+@dataclass(kw_only=True)
+class CorrectionResult(Record):
+    job_id: str
+    status: Literal["learned_from", "already_imported", "error"]
+    pattern_name: str | None = None
+    learning_run: str | None = None
+    outcome: str | None = None
+    result_version: str | None = None
+    error: str | None = None
+
+
+@dataclass(kw_only=True)
+class CorrectionsResponse(Record):
+    results: list[CorrectionResult] = field(default_factory=list)
+
+
+@dataclass(kw_only=True)
 class LearnRequest(Record):
     """One sample of a document pattern to learn from."""
 
@@ -39,8 +90,11 @@ class LearnRequest(Record):
     max_iterations: int | None = None
     #: Write the learned version into the runtime configs (false = dry run).
     publish: bool = True
-    #: With ground truth, also fail on any review status, not only wrong values.
+    #: With ground truth, also fail on any flag, not only wrong values.
     strict: bool = True
+    #: "pattern" (default): the learned skill applies only to documents matching the
+    #: sample's fingerprint; "global": to every document of the config version.
+    scope: Literal["pattern", "global"] = "pattern"
     requested_by: str = "designtime"
 
     def check(self) -> None:
@@ -103,6 +157,10 @@ class LearnResponse(Record):
     regression_samples: int = 0
     skill_path: str | None = None
     skill: str | None = None
+    #: The learned skill's fingerprint (empty: it applies to every document).
+    applies_to: dict[str, Any] = field(default_factory=dict)
+    #: Hints this call found harmful (they broke an earlier sample); remembered.
+    rejected_hints: list[str] = field(default_factory=list)
     #: The data the runtime extracts with the resulting config (base if nothing was learned).
     data: list[dict[str, Any]] = field(default_factory=list)
     #: Nodes the learning graph ran, in order.

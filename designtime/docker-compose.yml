@@ -31,11 +31,13 @@ services:
       LEARNING_MODEL_PROVIDER: ${LEARNING_MODEL_PROVIDER:-}
       MODEL_GATEWAY_URL: ${MODEL_GATEWAY_URL:-}
       MODEL_GATEWAY_TOKEN: ${MODEL_GATEWAY_TOKEN:-}
+      RUNTIME_URL: http://runtime:8000         # corrections import reads the runtime's review export
     volumes:
       # The runtime configs in this repo: learned versions land here, where the
       # runtime service below serves them and git can track them.
       - ../runtime/configs:/configs
       - ${LEARNING_DATA:-../runtime/data}:/data:ro
+      - learning-state:/learning-state
     ports:
       - "8000:8000"
     # Migrations run on start so a fresh clone comes up with one command.
@@ -48,13 +50,33 @@ services:
     container_name: dataextractor-runtime
     environment:
       CONFIG_ROOT: /configs
+      STATE_DIR: /state
+      WEBHOOK_SECRET: ${WEBHOOK_SECRET:-}
       MODEL_GATEWAY_URL: ${MODEL_GATEWAY_URL:-}
       MODEL_GATEWAY_TOKEN: ${MODEL_GATEWAY_TOKEN:-}
     volumes:
       - ../runtime/configs:/configs:ro
       - ${LEARNING_DATA:-../runtime/data}:/data:ro
+      - runtime-state:/state
     ports:
       - "8001:8000"
 
+  # More queue workers on the same state volume (scale with --scale runtime-worker=N).
+  runtime-worker:
+    build: ../runtime
+    command: ["python", "-m", "extractor_service.worker"]
+    environment:
+      CONFIG_ROOT: /configs
+      STATE_DIR: /state
+      WEBHOOK_SECRET: ${WEBHOOK_SECRET:-}
+      MODEL_GATEWAY_URL: ${MODEL_GATEWAY_URL:-}
+      MODEL_GATEWAY_TOKEN: ${MODEL_GATEWAY_TOKEN:-}
+    volumes:
+      - ../runtime/configs:/configs:ro
+      - ${LEARNING_DATA:-../runtime/data}:/data:ro
+      - runtime-state:/state
+
 volumes:
   designtime-pgdata:
+  runtime-state:
+  learning-state:

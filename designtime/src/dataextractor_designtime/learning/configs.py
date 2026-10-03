@@ -33,6 +33,18 @@ def _ignore(_dir: str, names: list[str]) -> list[str]:
     return [n for n in names if n.startswith(".") or n == "__pycache__"]
 
 
+def scratch_into(config_root: Path, folder: Path) -> Path:
+    """A private copy of every config under ``folder``, kept until the learning call finishes."""
+    if not Path(config_root).is_dir():
+        raise AgentError(f"no runtime configs at {config_root} (set RUNTIME_CONFIG_ROOT)",
+                         code="config_root_missing", status=500)
+    dst = Path(folder) / "configs"
+    if dst.exists():
+        shutil.rmtree(dst)
+    shutil.copytree(config_root, dst, ignore=_ignore)
+    return dst
+
+
 def scratch_copy(config_root: Path) -> tuple[tempfile.TemporaryDirectory, Path]:
     """A private copy of every config, for one learning call."""
     if not Path(config_root).is_dir():
@@ -76,6 +88,18 @@ def read_skill(folder: Path, name: str) -> tuple[dict[str, Any], str] | None:
         return {}, text
     meta = yaml.safe_load(m.group(1)) or {}
     return (meta if isinstance(meta, dict) else {}), text[m.end():]
+
+
+def existing_meta(folder: Path, pattern: str) -> dict[str, Any]:
+    """Front matter of this pattern's learned skill in ``folder``; refuses a hand-written skill."""
+    found = read_skill(folder, pattern)
+    if found is None:
+        return {}
+    meta, _ = found
+    if meta.get("kind") != LEARNED_KIND:
+        raise SkillConflict(f"skills/{pattern}.md exists and was not learned; pick another pattern_name",
+                            detail={"pattern_name": pattern})
+    return meta
 
 
 def existing_hints(folder: Path, pattern: str) -> dict[str, Any]:

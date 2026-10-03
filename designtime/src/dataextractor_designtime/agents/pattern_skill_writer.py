@@ -46,7 +46,7 @@ import datetime as dt
 import re
 from dataclasses import dataclass, field
 from decimal import Decimal, InvalidOperation
-from typing import Any
+from typing import Any, Literal
 
 import yaml
 
@@ -95,6 +95,15 @@ class PatternSkillWriterInput(Record):
     attempt: int = 1
     #: Joins a model call to its learning run in gateway logs (client, usecase, ...).
     trace: dict[str, str] = field(default_factory=dict)
+    #: Hints learning memory remembers as harmful: [{"field", "kind", "hint"}]. Never proposed.
+    avoid: list[dict[str, Any]] = field(default_factory=list)
+    #: "pattern": the skill applies only to documents matching its fingerprint;
+    #: "global": to every document of the config version.
+    scope: Literal["pattern", "global"] = "pattern"
+    #: The pattern skill's existing fingerprint, kept and extended.
+    existing_applies_to: dict[str, Any] = field(default_factory=dict)
+    #: The sample's input metadata from the runtime (name, sender, subject).
+    input: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass(kw_only=True)
@@ -107,6 +116,8 @@ class PatternSkillWriterOutput(Record):
     #: The whole skill file: front matter plus body.
     markdown: str
     written_by: str
+    #: The fingerprint that scopes the skill (empty = applies to every document).
+    applies_to: dict[str, Any] = field(default_factory=dict)
     notes: list[str] = field(default_factory=list)
 
 
@@ -116,10 +127,14 @@ class PatternSkillWriterOutput(Record):
 class _Hints:
     """fields -> {labels, anchors, items -> sub -> {labels}} with validation and order."""
 
-    def __init__(self, spec: dict[str, dict[str, Any]], existing: dict[str, Any] | None = None) -> None:
+    def __init__(self, spec: dict[str, dict[str, Any]], existing: dict[str, Any] | None = None,
+                 avoid: list[dict[str, Any]] | None = None) -> None:
         self.spec = spec
         self.data: dict[str, dict[str, Any]] = {}
         self.added: list[Derivation] = []
+        self.avoided: list[str] = []
+        self.avoid = {(a["field"], "labels" if a["kind"] in ("label", "labels") else "anchors",
+                       " ".join(str(a["hint"]).split()).casefold()) for a in (avoid or [])}
         self.known = {n: {a.casefold() for a in f.get("aliases", [])} | {n.replace("_", " ")}
                       for n, f in spec.items()}
         for name, h in ((existing or {}).get("fields") or {}).items():
@@ -149,6 +164,9 @@ class _Hints:
         if not value or len(value) > MAX_HINT_CHARS or not re.search(r"[A-Za-z]", value):
             return False
         name, _, sub = path.partition(".")
+        if record and (path, kind, value.casefold()) in self.avoid:
+            self.avoided.append(f"{path}:{kind[:-1]}:{value}")         # memory says it broke another sample
+            return False
         if kind == "labels" and not sub:
             # a label another field already answers to would steal that field's values
             if any(value.casefold() in aliases for other, aliases in self.known.items() if other != name):
@@ -319,7 +337,7 @@ class PatternSkillWriter(DesignAgent[PatternSkillWriterInput, PatternSkillWriter
                              code="invalid_pattern_name")
         fields = payload.dictionary.get("fields") or []
         spec = {f["name"]: f for f in fields}
-        hints = _Hints(spec, payload.existing_hints)
+        hints = _Hints(spec, payload.existing_hints, payload.avoid)
         ev = _Evidence(payload.evidence)
         notes: list[str] = []
 
@@ -375,14 +393,62 @@ class PatternSkillWriter(DesignAgent[PatternSkillWriterInput, PatternSkillWriter
             raise AgentError("the skill writer returned no body", code="skill_body_empty")
 
         final = hints.as_dict()
+        notes += [f"avoided:{a}" for a in hints.avoided]
+        applies_to = {} if payload.scope == "global" else self._fingerprint(payload, ev, final)
+        if payload.scope == "pattern" and not applies_to:
+            notes.append("no_fingerprint")
         front = {"name": payload.pattern_name, "kind": "learned-pattern", "pattern": payload.pattern_name,
                  "object": payload.object or payload.dictionary.get("name"),
-                 "generated_by": self.identity, "written_by": answer.produced_by, "hints": final}
+                 "generated_by": self.identity, "written_by": answer.produced_by,
+                 **({"applies_to": applies_to} if applies_to else {}), "hints": final}
         markdown = "---\n" + yaml.safe_dump(front, sort_keys=False, allow_unicode=True, width=1000) + \
             "---\n" + body + "\n"
         return PatternSkillWriterOutput(name=payload.pattern_name, hints=final, new_hints=hints.added,
                                         body=body, markdown=markdown, written_by=answer.produced_by,
-                                        notes=notes)
+                                        applies_to=applies_to, notes=notes)
+
+    # -------------------------------------------------------------- fingerprint
+
+    @staticmethod
+    def _fingerprint(payload: PatternSkillWriterInput, ev: _Evidence, hints: dict[str, Any]) -> dict[str, Any]:
+        """What documents of this pattern look like, so its hints stay with them (runtime scope.py).
+
+        The sender's domain when the sample is an email, the table headers it
+        carries, and, failing both, a short wordless title line. An existing
+        fingerprint is kept: its headers stay, domains and texts are added to.
+        """
+        old = payload.existing_applies_to or {}
+        out: dict[str, Any] = {}
+        sender = str(payload.input.get("sender") or "")
+        m = re.search(r"@([A-Za-z0-9.-]+)", sender)
+        domains = list(dict.fromkeys((old.get("sender_domains") or []) + ([m.group(1).lower()] if m else [])))
+        if domains:
+            out["sender_domains"] = domains
+        headers = list(old.get("headers") or [])
+        if not headers:
+            for d in ev.docs:
+                by_loc = {b["locator"]: b["text"] for b in d.get("blocks", [])}
+                for t in d.get("tables", []):
+                    for loc in t.get("header", []):
+                        text = " ".join(str(by_loc.get(loc, "")).split())
+                        if text and text not in headers and re.search(r"[A-Za-z]", text):
+                            headers.append(text)
+            headers = headers[:12]
+        if len(headers) >= 2:
+            out["headers"] = headers
+            out["min_header_share"] = float(old.get("min_header_share", 0.6))
+        texts = list(old.get("texts") or [])
+        if not out and not texts:
+            labels = {h.casefold() for f in (hints.get("fields") or {}).values() for h in f.get("labels", [])}
+            for _, b in ev.blocks():
+                t = " ".join(b["text"].split())
+                if 2 <= len(t.split()) <= 8 and len(t) <= 60 and not re.search(r"\d", t) \
+                        and ":" not in t and t.casefold() not in labels:
+                    texts = [t]
+                    break
+        if texts:
+            out["texts"] = texts
+        return out
 
     # -------------------------------------------------------------- ground truth
 

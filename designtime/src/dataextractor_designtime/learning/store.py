@@ -24,6 +24,19 @@ class LearningStore:
         self.session.flush()
         return row
 
+    def update(self, run_id: str, **values: Any) -> LearningRunRow:
+        row = self.get(run_id)
+        for k, v in values.items():
+            setattr(row, k, v)
+        self.session.flush()
+        return row
+
+    def delete(self, run_id: str) -> None:
+        row = self.session.get(LearningRunRow, run_id)
+        if row is not None:
+            self.session.delete(row)
+            self.session.flush()
+
     def get(self, run_id: str) -> LearningRunRow:
         row = self.session.get(LearningRunRow, run_id)
         if row is None:

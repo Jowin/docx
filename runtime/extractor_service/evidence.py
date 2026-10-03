@@ -8,8 +8,13 @@ column-based extraction.
 Locators (joined to the document's source prefix to make a CTR-13 source):
   CSV       B14
   Excel     Summary!B14, Summary!textbox:H10, Summary!H20:comment
-  PDF       p1:L4 (line), p1:T1:R2C3 (table cell)
-  Email     subject, L3 (body line)
+  PDF       p1:L4 (line), p1:T1:R2C3 (table cell), p2:O3 (OCR line)
+  DOCX      P12 (paragraph), T2:R3C4 (table cell)
+  Image     O3 (OCR line)
+  Email     subject, L3 (body line; ``segment`` says which message in the thread)
+
+Each item becomes one document on its own (``build_doc``), so the graph can
+parse items in parallel and in a sandbox; ``build_docs`` does them in order.
 """
 from __future__ import annotations
 
@@ -21,6 +26,9 @@ from typing import Any
 from extractor_tools import ToolError, extract_pdf_text, list_sheets, read_csv, read_sheet
 from extractor_tools.common import a1
 
+from . import ocr as ocr_tool
+from . import threads
+from .docx import read_docx
 from .intake import Item, Submission
 
 
@@ -33,6 +41,8 @@ class Block:
     group: str = ""            # sheet, "csv", page "p1", or table "p1:T1"
     row: int | None = None
     col: int | None = None
+    segment: int | None = None       # email bodies: 0 = newest message in the thread
+    confidence: float | None = None  # OCR'd text: the OCR engine's confidence, 0-1
 
 
 @dataclass
@@ -47,13 +57,14 @@ class Doc:
     doc_id: str
     source: str                # "file:inv.csv", "attachment:inv.xlsx", "body"
     name: str
-    kind: str                  # csv | excel | pdf | email_body
+    kind: str                  # csv | excel | pdf | docx | image | email_body
     sha256: str
     blocks: list[Block] = field(default_factory=list)
     tables: list[Table] = field(default_factory=list)
     notes: list[str] = field(default_factory=list)
     status: str = "read"       # read | failed
     reason: str | None = None
+    order: int = 0             # position of the item in the submission
 
     def by_locator(self) -> dict[str, Block]:
         return {b.locator: b for b in self.blocks}
@@ -150,8 +161,8 @@ def _sheet_tables(group: str, grid: list[list[Block]]) -> list[Table]:
     return tables
 
 
-def _pdf_doc(doc: Doc, item: Item, ev: dict[str, Any]) -> None:
-    r = extract_pdf_text(item.data, item.name, page_limit=int(ev["pages"]),
+def _pdf_doc(doc: Doc, data: bytes, item: Item, ev: dict[str, Any]) -> None:
+    r = extract_pdf_text(data, item.name, page_limit=int(ev["pages"]),
                          tail_pages=int(ev["tail_pages"]))["result"]
     for page in r["pages"] + r["tail"]:
         if page.get("error"):
@@ -176,46 +187,125 @@ def _pdf_doc(doc: Doc, item: Item, ev: dict[str, Any]) -> None:
                 grid.append(blocks)
             if len(grid) >= 2:
                 doc.tables.append(Table(t["locator"], grid[0], grid[1:]))
-    if r["pages_without_text_layer"]:
-        doc.notes.append("no_text_layer:" + ",".join(f"p{p}" for p in r["pages_without_text_layer"]))
+    blank = list(r["pages_without_text_layer"])
+    read = sorted({int(b.group[1:]) for b in doc.blocks if b.group.startswith("p") and ":" not in b.group})
+    # RT-16: OCR only pages without a text layer, and record which path each page took
+    ocred = []
+    if blank and ev.get("ocr", True) and ocr_tool.available():
+        for p in blank:
+            try:
+                lines = ocr_tool.ocr_pdf_page(data, p, timeout_s=float(ev.get("ocr_timeout_s", 60)))
+            except Exception as exc:                          # noqa: BLE001 - an OCR failure is a note
+                doc.notes.append(f"ocr_failed:p{p}:{type(exc).__name__}")
+                continue
+            for ln in lines:
+                doc.blocks.append(Block(f"p{p}:O{ln.line}", ln.text, group=f"p{p}", row=1000 + ln.line,
+                                        confidence=ln.confidence))
+            ocred.append(p)
+    for p in read:
+        doc.notes.append(f"page_source:p{p}=pdf_text")
+    for p in ocred:
+        doc.notes.append(f"page_source:p{p}=ocr")
+    still_blank = [p for p in blank if p not in ocred]
+    if still_blank:
+        doc.notes.append("no_text_layer:" + ",".join(f"p{p}" for p in still_blank))
     if r["window"]["has_more"]:
         doc.notes.append(f"pages_truncated:{r['page_count']}")
-    if not any(b.locator.count(":L") for b in doc.blocks):
-        raise ToolError("no_text_layer", "PDF has no text layer on the pages read")
+    if not any(":L" in b.locator or ":O" in b.locator for b in doc.blocks):
+        raise ToolError("no_text_layer", "PDF has no text layer on the pages read" +
+                        ("" if ocr_tool.available() else " and OCR is not installed"))
 
 
-# ------------------------------------------------------------------ documents
+def _docx_doc(doc: Doc, data: bytes, item: Item, ev: dict[str, Any]) -> None:
+    try:
+        content = read_docx(data)
+    except Exception as exc:                                   # noqa: BLE001
+        raise ToolError("parse_failed", f"cannot read the .docx: {exc}") from exc
+    for n, text in content.paragraphs:
+        doc.blocks.append(Block(f"P{n}", text, group="docx", row=n))
+    for t, rows in enumerate(content.tables, start=1):
+        grid = []
+        for r, cells in enumerate(rows, start=1):
+            blocks = [Block(f"T{t}:R{r}C{c}", text, group=f"T{t}", row=r, col=c)
+                      for c, text in enumerate(cells, start=1) if text]
+            doc.blocks.extend(blocks)
+            if blocks:
+                grid.append(blocks)
+        if len(grid) >= 2:
+            doc.tables.append(Table(f"T{t}", grid[0], grid[1:]))
 
-def build_docs(sub: Submission, ev: dict[str, Any]) -> tuple[list[Doc], list[str]]:
-    docs: list[Doc] = []
-    reasons: list[str] = []
-    if sub.subject or sub.body_text:
-        body = Doc(f"d{len(docs) + 1}", "body", "email body", "email_body",
-                   hashlib.sha256((sub.body_text or "").encode()).hexdigest())
-        if sub.subject:
-            body.blocks.append(Block("subject", sub.subject.strip(), group="subject"))
-        for i, line in enumerate((sub.body_text or "").splitlines(), start=1):
-            if line.strip():
-                body.blocks.append(Block(f"L{i}", " ".join(line.split()), group="body", row=i))
-        docs.append(body)
-    for item in sub.items:
-        doc = Doc(f"d{len(docs) + 1}", item.source_prefix, item.name, item.kind,
-                  hashlib.sha256(item.data).hexdigest())
-        try:
-            {"csv": _csv_doc, "excel": _excel_doc, "pdf": _pdf_doc}[item.kind](doc, item, ev)
-        except ToolError as exc:
-            doc.status = "failed"
-            doc.reason = "encrypted_no_key" if exc.code == "file_encrypted" \
-                else f"attachment_parse_failed:{item.name}"
-            doc.notes.append(f"{exc.code}: {exc}")
-            doc.blocks, doc.tables = [], []
-            reasons.append(doc.reason)
-        docs.append(doc)
-    return docs, reasons
+
+def _image_doc(doc: Doc, data: bytes, item: Item, ev: dict[str, Any]) -> None:
+    if not ocr_tool.available():
+        raise ToolError("ocr_unavailable", "OCR is not installed")
+    for ln in ocr_tool.ocr_image(data, timeout_s=float(ev.get("ocr_timeout_s", 60))):
+        doc.blocks.append(Block(f"O{ln.line}", ln.text, group="ocr", row=ln.line, confidence=ln.confidence))
+    doc.notes.append("page_source:image=ocr")
+
+
+def _body_doc(doc: Doc, data: bytes, item: Item, ev: dict[str, Any]) -> None:
+    subject = item.meta.get("subject")
+    if subject:
+        doc.blocks.append(Block("subject", subject.strip(), group="subject", segment=0))
+    text = data.decode("utf-8", errors="replace")
+    segs = threads.split(text)
+    for i, line in enumerate(text.splitlines(), start=1):
+        if line.strip():
+            doc.blocks.append(Block(f"L{i}", " ".join(line.split()), group="body", row=i,
+                                    segment=threads.segment_of(segs, i)))
+    if len(segs) > 1:
+        doc.notes.append(f"thread_segments:{len(segs)}")
+
+
+_PARSERS = {"csv": lambda d, data, i, ev: _csv_doc(d, _with(i, data), ev),
+            "excel": lambda d, data, i, ev: _excel_doc(d, _with(i, data), ev),
+            "pdf": _pdf_doc, "docx": _docx_doc, "image": _image_doc, "email_body": _body_doc}
+
+
+def _with(item: Item, data: bytes) -> Item:
+    """The CSV and Excel readers take the item; give them one that carries its bytes."""
+    if item.data is not None:
+        return item
+    from dataclasses import replace
+    return replace(item, data=data)
+
+
+def build_doc(item: Item, ev: dict[str, Any], spool: Any = None, doc_id: str = "") -> Doc:
+    """One item -> one document. A parse failure is a failed document with a reason, never an exception."""
+    kind = "email_body" if item.kind == "email_body" else item.kind
+    name = "email body" if item.source_prefix == "body" else item.name
+    doc = Doc(doc_id, item.source_prefix, name, kind, item.sha256, order=item.order)
+    try:
+        data = item.read(spool)
+        _PARSERS[item.kind](doc, data, item, ev)
+    except ToolError as exc:
+        doc.status = "failed"
+        doc.reason = "encrypted_no_key" if exc.code == "file_encrypted" \
+            else f"attachment_parse_failed:{item.name}"
+        doc.notes.append(f"{exc.code}: {exc}")
+        doc.blocks, doc.tables = [], []
+    return doc
+
+
+def number_docs(docs: list[Doc]) -> list[Doc]:
+    """Sort by submission order and give each its id (d1, d2, ...)."""
+    out = sorted(docs, key=lambda d: d.order)
+    for n, d in enumerate(out, start=1):
+        d.doc_id = f"d{n}"
+    return out
+
+
+def build_docs(sub: Submission, ev: dict[str, Any], spool: Any = None) -> tuple[list[Doc], list[str]]:
+    docs = number_docs([build_doc(item, ev, spool) for item in sub.items])
+    return docs, [d.reason for d in docs if d.status == "failed" and d.reason]
 
 
 def render(docs: list[Doc], max_chars: int) -> str:
-    """Evidence text for the model: one line per row or text line, every cell cited."""
+    """Evidence text for the model: one line per row or text line, every cell cited.
+
+    Email bodies mark where an older message of the thread starts; OCR'd lines
+    are marked so the model weighs them accordingly.
+    """
     parts = []
     for doc in docs:
         if doc.status != "read":
@@ -232,8 +322,14 @@ def render(docs: list[Doc], max_chars: int) -> str:
                 order.append(key)
             rows[key].append(b)
         size = len(lines[0])
+        segment = 0
         for key in order:
-            line = " | ".join(f"[{doc.doc_id}#{b.locator}] {b.text}" for b in rows[key])
+            first = rows[key][0]
+            if first.segment and first.segment != segment:
+                segment = first.segment
+                lines.append(f"--- earlier message in the thread (segment {segment}) ---")
+            line = " | ".join(f"[{doc.doc_id}#{b.locator}]{' (ocr)' if b.confidence is not None else ''} {b.text}"
+                              for b in rows[key])
             if size + len(line) > max_chars:
                 lines.append(f"[{doc.doc_id}] … evidence truncated at {max_chars} characters")
                 break

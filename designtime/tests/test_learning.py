@@ -115,7 +115,7 @@ def test_ground_truth_failure_learns_a_new_version(learn_env):
     assert one["skill"] == skill and one["ground_truth"] == [REMIT_TRUTH]
 
 
-def test_without_ground_truth_review_status_is_the_test(learn_env):
+def test_without_ground_truth_the_flags_are_the_test(learn_env):
     r = learn_env["client"].post("/learning/runs", json={
         "source": "remit.csv", "pattern_name": "hooli-remittance",
         "reference_text": ('invoice_number: "Our Ref"\n- invoice_date = "Bill Date"\n'
@@ -123,7 +123,7 @@ def test_without_ground_truth_review_status_is_the_test(learn_env):
                            'total_amount -> "Amount Payable"')})
     body = r.json()
     assert r.status_code == 200, r.text
-    assert body["verdict_before"]["mode"] == "review_status"
+    assert body["verdict_before"]["mode"] == "flags"
     assert any(f["reason"] == "missing_field:invoice_number" for f in body["verdict_before"]["failures"])
     assert body["outcome"] == "learned" and body["result_version"] == "1.0.1"
     bases = {d["field"]: d["basis"] for d in body["attempts"][0]["new_hints"]}
@@ -150,21 +150,103 @@ def test_each_learning_call_adds_a_patch_version(learn_env):
     assert manifest["skills"][-2:] == ["hooli-remittance", "globex-note"]
 
 
-def test_a_candidate_that_breaks_an_earlier_sample_is_rejected(learn_env):
+def test_a_global_candidate_that_breaks_an_earlier_sample_is_rejected_and_remembered(learn_env):
     c = learn_env["client"]
     terms_truth = {"invoice_number": "INV-9", "total_amount": 99}
     ok = c.post("/learning/runs", json={"source": "terms.csv", "pattern_name": "acme-terms",
                                         "ground_truth": terms_truth}).json()
     assert ok["outcome"] == "passed"            # now part of the regression set
-    r = c.post("/learning/runs", json={"source": "note.csv", "pattern_name": "globex-note",
-                                       "ground_truth": {"invoice_number": "INV-77", "total_amount": 310.50}})
-    body = r.json()
+    note = {"source": "note.csv", "pattern_name": "globex-note", "scope": "global",
+            "ground_truth": {"invoice_number": "INV-77", "total_amount": 310.50}}
+    body = c.post("/learning/runs", json=note).json()
     assert body["regression_samples"] == 1
     first = body["attempts"][0]
     assert first["regressions"] == ["terms.csv"] and first["accepted"] is False
     assert first["score"]["value_failures"] == 0          # it did fix its own sample
     assert body["outcome"] == "failed" and body["result_version"] is None
+    assert body["rejected_hints"] == ["total_amount:anchor:kindly remit"]
     assert _versions(learn_env["configs"]) == ["1.0.0"]
+    # memory: the harmful anchor is never proposed again, in this call or the next
+    mem = c.get("/learning/memory", params={"client": "default", "usecase": "invoice"}).json()
+    assert [(h["field"], h["kind"], h["hint"]) for h in mem["rejected_hints"]] == \
+        [("total_amount", "anchors", "kindly remit")]
+    assert mem["rejected_hints"][0]["reason"] == "regression:terms.csv"
+    again = c.post("/learning/runs", json=note).json()
+    assert again["outcome"] == "failed" and again["attempts"][0]["new_hints"] == []
+    assert "avoided:total_amount:anchor:kindly remit" in again["attempts"][0]["notes"]
+
+
+def test_pattern_scope_keeps_hints_away_from_other_layouts(learn_env):
+    c = learn_env["client"]
+    assert c.post("/learning/runs", json={"source": "terms.csv", "pattern_name": "acme-terms",
+                                          "ground_truth": {"invoice_number": "INV-9", "total_amount": 99}}
+                  ).json()["outcome"] == "passed"
+    body = c.post("/learning/runs", json={"source": "note.csv", "pattern_name": "globex-note",
+                                          "ground_truth": {"invoice_number": "INV-77", "total_amount": 310.50}}
+                  ).json()
+    assert body["outcome"] == "learned", body["attempts"]
+    assert body["attempts"][0]["regressions"] == []
+    assert body["applies_to"]["headers"] == ["Invoice No", "Invoice Date", "Supplier", "Notes"]
+    assert "applies_to:" in body["skill"]
+    # the published version serves both: the note gets its total, the terms keep theirs
+    assert _extract(learn_env, "note.csv", "1.0.1")["data"][0]["total_amount"] == 310.5
+    terms = _extract(learn_env, "terms.csv", "1.0.1")
+    assert terms["data"][0]["total_amount"] == 99 and "globex-note" not in terms["metadata"]["skills_applied"]
+    mem = c.get("/learning/memory", params={"client": "default", "usecase": "invoice"}).json()
+    [pattern] = [p for p in mem["patterns"] if p["name"] == "globex-note"]
+    assert pattern["versions"] == ["1.0.1"] and pattern["applies_to"]["headers"][0] == "Invoice No"
+
+
+class FlakyRuntime:
+    """Delegates to the real isolated runtime, but dies on one chosen call (a lost process)."""
+
+    def __init__(self, real, die_on: int) -> None:
+        self.real, self.die_on, self.calls = real, die_on, 0
+
+    def run(self, *a, **k):
+        self.calls += 1
+        if self.calls == self.die_on:
+            raise RuntimeError("worker lost")
+        return self.real.run(*a, **k)
+
+
+def test_an_interrupted_learning_call_resumes_from_its_checkpoint(learn_env):
+    from dataextractor_designtime.learning import IsolatedRuntime
+    from dataextractor_designtime.main import app
+    real = IsolatedRuntime(RUNTIME, python=sys.executable, input_root=learn_env["data"], model_provider="stub")
+    flaky = FlakyRuntime(real, die_on=3)            # base run, regression set, then dies testing the candidate
+    app.state.isolated_runtime = flaky
+    try:
+        with pytest.raises(RuntimeError):
+            learn_env["client"].post("/learning/runs", json={"source": "remit.csv", "pattern_name": "hooli-remittance",
+                                                             "ground_truth": REMIT_TRUTH})
+        [run] = learn_env["client"].get("/learning/runs").json()
+        assert run["outcome"] == "interrupted"
+        assert learn_env["client"].get(f"/learning/runs/{run['id']}").json()["error"]["message"] == "worker lost"
+        r = learn_env["client"].post(f"/learning/runs/{run['id']}/resume")
+    finally:
+        app.state.isolated_runtime = None
+    body = r.json()
+    assert r.status_code == 200, body
+    assert body["outcome"] == "learned" and body["result_version"] == "1.0.1"
+    assert flaky.calls == 4                         # resumed at test_candidate: nothing before it ran again
+    assert body["path"].count("extract_base") == 1 and body["path"].count("write_skill") == 1
+    assert learn_env["client"].post(f"/learning/runs/{run['id']}/resume").json()["detail"]["code"] == "run_finished"
+
+
+def test_reviewer_corrections_become_ground_truth(learn_env):
+    item = {"job_id": "job_abc", "audit_id": "run_1", "client": "default", "usecase": "invoice",
+            "file_location": "remit.csv", "ground_truth": [REMIT_TRUTH], "sender": "billing@hooli.example",
+            "reviewer": "maya", "corrected_fields": [{"record": 0, "field": "invoice_number"}]}
+    c = learn_env["client"]
+    first = c.post("/learning/corrections", json={"items": [item]}).json()["results"]
+    assert first == [{"job_id": "job_abc", "status": "learned_from", "pattern_name": "corrected-hooli-example",
+                      "learning_run": first[0]["learning_run"], "outcome": "learned", "result_version": "1.0.1",
+                      "error": None}]
+    run = c.get(f"/learning/runs/{first[0]['learning_run']}").json()
+    assert run["requested_by"] == "review:maya" and run["ground_truth"] == [REMIT_TRUTH]
+    again = c.post("/learning/corrections", json={"items": [item]}).json()["results"]
+    assert again[0]["status"] == "already_imported" and _versions(learn_env["configs"]) == ["1.0.0", "1.0.1"]
 
 
 def test_dry_run_reports_the_version_without_writing_it(learn_env):

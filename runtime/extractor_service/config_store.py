@@ -25,6 +25,14 @@ deterministic stub included, uses them. The model sees the body only.
     ## Skill: acme remittance advice
     ...
 
+A skill may also carry ``applies_to`` (see scope.py): then its hints and body
+are used only for documents that match it. ``ExtractionConfig.for_documents``
+picks the skills for one run; ``dictionary`` (every hint applied) is the
+config's full dictionary, used for validation and description.
+
+Lookup data for the ingestion filter sits in ``lookups/`` next to the
+manifest, and in ``<CONFIG_ROOT>/lookups/`` for every config (ingest_filter.py).
+
 How a request picks its folder (each part the request leaves out):
   client   -> the default client
   usecase  -> the default use case when the client is the default client,
@@ -48,6 +56,7 @@ from typing import Any
 
 import yaml
 
+from . import scope
 from .errors import ConfigError
 from .schema import DataDictionary, apply_hints, load_dictionary
 
@@ -55,9 +64,13 @@ _SEGMENT = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]{0,63}$")
 _SEMVER = re.compile(r"^(\d+)\.(\d+)\.(\d+)$")
 
 DEFAULT_EVIDENCE = {"rows": 200, "tail_rows": 10, "pages": 10, "tail_pages": 1,
-                    "max_sheets": 5, "max_chars_per_document": 60_000}
+                    "max_sheets": 5, "max_chars_per_document": 60_000,
+                    "ocr": True, "ocr_timeout_s": 60, "parse_timeout_s": 120}
 DEFAULT_INTAKE = {"max_zip_members": 200, "max_zip_uncompressed_mb": 200,
-                  "max_compression_ratio": 100, "max_zip_depth": 1}
+                  "max_compression_ratio": 100, "max_zip_depth": 1,
+                  "max_email_depth": 3, "ocr_images": False}
+#: run_ceiling_s: RT-60's hard cap. max_cost_usd: RT-62's per-run model cost ceiling (unset = none).
+DEFAULT_LIMITS = {"run_ceiling_s": 300, "max_cost_usd": None}
 
 
 @dataclass(frozen=True)
@@ -69,6 +82,10 @@ class Skill:
     @property
     def hints(self) -> dict[str, Any]:
         return self.meta.get("hints") or {}
+
+    @property
+    def applies_to(self) -> dict[str, Any]:
+        return self.meta.get("applies_to") or {}
 
 
 _FRONT = re.compile(r"\A---[ \t]*\r?\n(.*?)\r?\n---[ \t]*(?:\r?\n|\Z)", re.S)
@@ -85,6 +102,7 @@ def parse_skill(name: str, text: str) -> Skill:
         raise ConfigError("config_invalid", f"skill {name!r}: front matter is not valid YAML: {exc}") from exc
     if not isinstance(meta, dict):
         raise ConfigError("config_invalid", f"skill {name!r}: front matter must be a mapping")
+    scope.validate(name, meta.get("applies_to"))
     return Skill(name, text[m.end():].lstrip("\r\n"), meta)
 
 
@@ -100,6 +118,25 @@ class ExtractionConfig:
     system_prompt: str
     skills: tuple[Skill, ...]
     resolved_by: dict[str, str]
+    base_dictionary: DataDictionary | None = None     # the schema.json dictionary, before any hints
+    root: Path | None = None                          # CONFIG_ROOT, for global lookup data
+
+    def for_documents(self, facts: dict[str, Any]) -> tuple[DataDictionary, tuple[Skill, ...]]:
+        """The dictionary and skills for one run: skills whose fingerprint matches (or that have none)."""
+        chosen = tuple(s for s in self.skills if scope.applies(s.applies_to, facts))
+        if len(chosen) == len(self.skills) or self.base_dictionary is None:
+            return self.dictionary, chosen if self.base_dictionary is not None else self.skills
+        return apply_hints(self.base_dictionary, [(s.name, s.hints) for s in chosen]), chosen
+
+    @property
+    def ingestion_filter(self):
+        from .ingest_filter import IngestionFilter
+        key = "_ingestion_filter"
+        cached = self.__dict__.get(key)
+        if cached is None:
+            cached = IngestionFilter.load(self.root or self.path.parent.parent.parent, self.path)
+            object.__setattr__(self, key, cached)
+        return cached
 
     @property
     def model(self) -> dict[str, Any]:
@@ -116,6 +153,14 @@ class ExtractionConfig:
     @property
     def intake(self) -> dict[str, Any]:
         return {**DEFAULT_INTAKE, **(self.manifest.get("intake") or {})}
+
+    @property
+    def limits(self) -> dict[str, Any]:
+        return {**DEFAULT_LIMITS, **(self.manifest.get("limits") or {})}
+
+    @property
+    def max_parallel(self) -> int:
+        return int((self.manifest.get("concurrency") or {}).get("max_parallel", 4))
 
     @property
     def date_order(self) -> str | None:
@@ -248,11 +293,15 @@ class ConfigStore:
     def _load(self, folder: Path, client: str, usecase: str, version: str,
               by: dict[str, str]) -> ExtractionConfig:
         sha = folder_sha256(folder)
-        key = (str(folder), sha)
+        lookups = self.root / "lookups"
+        key = (str(folder), sha, folder_sha256(lookups) if lookups.is_dir() else "")
         with self._lock:
             cached = self._cache.get(key)
         if cached:
-            return ExtractionConfig(**{**cached.__dict__, "resolved_by": dict(by)})
+            fields_ = {k: v for k, v in cached.__dict__.items() if not k.startswith("_")}
+            out = ExtractionConfig(**{**fields_, "resolved_by": dict(by)})
+            object.__setattr__(out, "_ingestion_filter", cached.ingestion_filter)
+            return out
 
         manifest = _read_json(folder / "manifest.json")
         if not isinstance(manifest, dict):
@@ -268,6 +317,7 @@ class ConfigStore:
             if not p.is_file():
                 raise ConfigError("config_incomplete", f"skill {name!r} listed but skills/{name}.md missing")
             skills.append(parse_skill(name, p.read_text(encoding="utf-8")))
+        base_dictionary = dictionary
         dictionary = apply_hints(dictionary, [(s.name, s.hints) for s in skills])
         provider = (manifest.get("model") or {}).get("provider", "stub")
         if provider not in ("stub", "gateway"):
@@ -275,7 +325,9 @@ class ConfigStore:
         cfg = ExtractionConfig(client=client, usecase=usecase, version=version, path=folder,
                                sha256=sha, manifest=manifest, dictionary=dictionary,
                                system_prompt=prompt_path.read_text(encoding="utf-8"),
-                               skills=tuple(skills), resolved_by=dict(by))
+                               skills=tuple(skills), resolved_by=dict(by),
+                               base_dictionary=base_dictionary, root=self.root)
+        cfg.ingestion_filter                      # load and validate lookup data now, not mid-run
         with self._lock:
             self._cache[key] = cfg
         return cfg

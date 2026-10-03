@@ -61,11 +61,11 @@ def test_learned_labels_turn_review_into_extracted(stub_client, config_root, inp
     (input_root / "remit.csv").write_text(REMITTANCE)
     before = stub_client.post("/extract", json={"file_location": "remit.csv", "extended": True,
                                                 "version": "1.0.0"}).json()
-    assert before["status"] == "review"
+    assert before["flagged"] is True
     _learned_version(config_root)
     after = stub_client.post("/extract", json={"file_location": "remit.csv", "extended": True,
                                                "version": "1.0.1"}).json()
-    assert after["status"] == "extracted", after["review_reasons"]
+    assert after["flagged"] is False, after["flags"]
     rec = after["data"][0]
     assert rec["invoice_number"] == "RA-501" and rec["vendor"] == "Hooli Inc"
     assert rec["total_amount"] == 2000 and rec["due_date"] == "2026-09-02"
@@ -104,8 +104,9 @@ def test_cli_batch_returns_outputs_errors_and_evidence(settings, input_root):
     assert ok["config"]["version"] == "1.0.0" and ok["skills"] == ["field-extraction", "table-extraction"]
     doc = ok["evidence"][0]
     assert doc["source"] == "file:invoice.pdf" and any("INI-0042" in b["text"] for b in doc["blocks"])
-    assert bad == {"ok": False, "error": {"error": "file_not_found", "message": "no file at missing.csv",
-                                          "detail": {"file_location": "missing.csv"}, "status": 404}}
+    assert bad["ok"] is False and bad["error"] == {"error": "file_not_found", "message": "no file at missing.csv",
+                                                   "detail": {"file_location": "missing.csv"}, "status": 404}
+    assert bad["output"]["flags"] == ["error:file_not_found"]          # still a result
 
 
 def test_cli_process(settings):

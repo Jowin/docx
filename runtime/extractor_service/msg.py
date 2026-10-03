@@ -11,7 +11,8 @@ package is deliberately not used, so the image carries no copyleft code.
 
 What is read: subject, sender, body (plain text, else HTML, else RTF), and
 each attachment's name and bytes. An attached message (Outlook "item"
-attachment) is reported as embedded, not opened, matching .eml handling.
+attachment) is read recursively as its own message (``MsgAttachment.message``);
+intake applies the depth limit.
 """
 from __future__ import annotations
 
@@ -53,6 +54,8 @@ class MsgAttachment:
     data: bytes | None
     method: int | None
     embedded_message: bool = False
+    #: The attached Outlook item itself, read the same way, when it is one.
+    message: "MsgMessage | None" = None
 
 
 @dataclass
@@ -140,8 +143,16 @@ def read_msg(data: bytes) -> MsgMessage:
             raise MsgError(f"cannot read .msg content: {exc}") from exc
 
 
-def _read(ole) -> MsgMessage:
-    top = _Props(ole, "", header_size=32)
+PT_OBJECT_STORAGE = "__substg1.0_3701000D"
+
+
+def _read(ole, prefix: str = "", header_size: int = 32, depth: int = 0) -> MsgMessage:
+    """Read the message at ``prefix``; an attached Outlook item is read recursively.
+
+    The top-level property stream has a 32-byte header, an embedded message's
+    has 24, and an attachment's has 8 ([MS-OXMSG] 2.4).
+    """
+    top = _Props(ole, prefix, header_size=header_size)
     msg = MsgMessage()
     msg.subject = top.text(PR_SUBJECT)
     name = top.text(PR_SENDER_NAME) or top.text(PR_SENT_REPRESENTING_NAME)
@@ -153,18 +164,25 @@ def _read(ole) -> MsgMessage:
     msg.message_id = top.text(PR_INTERNET_MESSAGE_ID)
     msg.body_text = _body(top)
 
-    storages = sorted({e[0] for e in ole.listdir(streams=False, storages=True)
-                       if e and e[0].startswith("__attach_version1.0_#")})
+    parts = [p for p in prefix.split("/") if p]
+    storages = sorted({e[len(parts)] for e in ole.listdir(streams=False, storages=True)
+                       if len(e) > len(parts) and list(e[:len(parts)]) == parts
+                       and e[len(parts)].startswith("__attach_version1.0_#")})
     for storage in storages:
-        a = _Props(ole, f"{storage}/", header_size=8)
+        path = f"{prefix}{storage}/"
+        a = _Props(ole, path, header_size=8)
         a.codepage = top.codepage if a.codepage == "cp1252" else a.codepage
         name = (a.text(PR_ATTACH_LONG_FILENAME) or a.text(PR_ATTACH_FILENAME)
                 or a.text(PR_DISPLAY_NAME) or storage.rsplit("#", 1)[-1])
         method = a.int(PR_ATTACH_METHOD)
-        embedded = ole.exists(f"{storage}/__substg1.0_{PR_ATTACH_DATA:04X}{PT_OBJECT:04X}")
+        embedded = ole.exists(f"{path}{PT_OBJECT_STORAGE}")
         payload = None if embedded else a.raw(PR_ATTACH_DATA, PT_BINARY)
+        inner = None
+        if embedded and depth < 8:          # hard stop; the configured depth limit is applied by intake
+            inner = _read(ole, f"{path}{PT_OBJECT_STORAGE}/", header_size=24, depth=depth + 1)
         msg.attachments.append(MsgAttachment(name=name, data=payload, method=method,
-                                             embedded_message=embedded or method == ATTACH_EMBEDDED_MSG))
+                                             embedded_message=embedded or method == ATTACH_EMBEDDED_MSG,
+                                             message=inner))
     return msg
 
 

@@ -31,9 +31,9 @@ DICTIONARY = {
 }
 
 
-def _output(records, status="extracted", reasons=()):
-    return {"status": status, "data": records, "review_reasons": list(reasons),
-            "records": [{"review_reasons": list(reasons), "fields": {}} for _ in records]}
+def _output(records, flagged=False, reasons=()):
+    return {"status": "extracted", "flagged": flagged, "data": records, "flags": list(reasons),
+            "records": [{"flags": list(reasons), "flagged": flagged, "fields": {}} for _ in records]}
 
 
 def _doc(blocks, tables=()):
@@ -68,17 +68,17 @@ def test_judge_line_items_and_missing_records():
     assert ("item_mismatch", "line_items") in kinds and ("missing_record", "invoice_number") in kinds
 
 
-def test_without_ground_truth_any_review_reason_fails():
-    out = _output([{"invoice_number": "A"}], status="review",
+def test_without_ground_truth_any_flag_fails():
+    out = _output([{"invoice_number": "A"}], flagged=True,
                   reasons=["missing_field:vendor", "unverified_value:line_items[0].amount", "low_confidence"])
     v = ExtractionJudge().run(ExtractionJudgeInput(output=out, dictionary=DICTIONARY))
-    assert v.mode == "review_status" and not v.passed
+    assert v.mode == "flags" and not v.passed and v.flagged
     assert v.failing_fields == ["vendor", "line_items"]
-    assert v.score.review_failures == 3 and v.score.value_failures == 0
+    assert v.score.flag_failures == 3 and v.score.value_failures == 0
 
 
-def test_strict_off_ignores_review_when_values_are_right():
-    out = _output([{"invoice_number": "A"}], status="review", reasons=["low_confidence"])
+def test_strict_off_ignores_flags_when_values_are_right():
+    out = _output([{"invoice_number": "A"}], flagged=True, reasons=["low_confidence"])
     truth = [{"invoice_number": "A"}]
     assert not ExtractionJudge().run(ExtractionJudgeInput(output=out, dictionary=DICTIONARY,
                                                           ground_truth=truth)).passed
@@ -128,7 +128,7 @@ def test_writer_without_ground_truth_uses_unclaimed_labels_that_fit():
     evidence = _doc([("A1", "Payment deadline: 2026-09-30", None, None), ("A2", "Colour: blue", None, None)])
     out = _write(failing_fields=["due_date", "vendor"], evidence=evidence)
     assert out.hints == {"fields": {"due_date": {"labels": ["Payment deadline"]}}}
-    assert out.notes == ["no_candidate:vendor"]
+    assert out.notes == ["no_candidate:vendor", "no_fingerprint"]
 
 
 def test_writer_never_steals_another_fields_label():

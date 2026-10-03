@@ -20,6 +20,11 @@ Anthropic API serves it directly). Model aliases resolve to Claude model ids.
   MODEL_GATEWAY_MODELS        JSON alias map overriding the built-in one, e.g. {"default": "claude-opus-5-5"}
   MODEL_GATEWAY_TIMEOUT_S     per attempt, default 120
   MODEL_GATEWAY_RETRIES       extra attempts on transient failures, default 2
+  MODEL_GATEWAY_PRICES        JSON prices in USD per million tokens, by model id or alias, e.g.
+                              {"default": {"input": 3.0, "output": 15.0}}; without it cost is unknown
+
+Cost (RT-62): ``estimate_cost`` projects a call's cost before it is made and
+``cost_of`` prices one that was; both return None when no price is configured.
 
 Every request carries the run's audit id, client and use case as headers
 (X-Request-Id, X-Client-Id, X-Usecase, X-Config-Version, X-Model-Alias) so
@@ -83,6 +88,7 @@ class ModelResponse:
     usage: dict[str, int] = field(default_factory=dict)
     gateway_request_id: str | None = None
     latency_ms: float = 0.0
+    cost_usd: float | None = None
 
 
 Gateway = Callable[[ModelRequest], ModelResponse]
@@ -98,6 +104,39 @@ def resolve_model(alias: str) -> str:
         except (ValueError, AttributeError) as exc:
             raise ModelError("model_unavailable", f"MODEL_GATEWAY_MODELS is not a JSON object: {exc}") from exc
     return aliases.get(alias or "default", alias)
+
+
+def _prices() -> dict[str, dict[str, float]]:
+    raw = os.environ.get("MODEL_GATEWAY_PRICES")
+    if not raw:
+        return {}
+    try:
+        return {str(k): {"input": float(v["input"]), "output": float(v["output"])}
+                for k, v in json.loads(raw).items()}
+    except (ValueError, KeyError, TypeError, AttributeError):
+        return {}
+
+
+def _price(alias_or_id: str) -> dict[str, float] | None:
+    prices = _prices()
+    return prices.get(alias_or_id) or prices.get(resolve_model(alias_or_id))
+
+
+def estimate_cost(alias: str, input_chars: int, max_output_tokens: int) -> float | None:
+    """A ceiling on one call's cost: ~4 characters a token in, every allowed token out."""
+    p = _price(alias or "default")
+    if p is None:
+        return None
+    return round((input_chars / 4) * p["input"] / 1e6 + max_output_tokens * p["output"] / 1e6, 6)
+
+
+def cost_of(alias: str, usage: dict[str, int]) -> float | None:
+    p = _price(alias or "default")
+    if p is None:
+        return None
+    tokens_in = usage.get("input_tokens", 0) + usage.get("cache_creation_input_tokens", 0) + \
+        usage.get("cache_read_input_tokens", 0)
+    return round(tokens_in * p["input"] / 1e6 + usage.get("output_tokens", 0) * p["output"] / 1e6, 6)
 
 
 def _wire_body(request: ModelRequest, model_id: str) -> dict[str, Any]:
@@ -159,7 +198,9 @@ def call_model(request: ModelRequest, *, transport: Any = None) -> ModelResponse
                 continue
             latency = round((time.perf_counter() - t0) * 1000, 1)
             if resp.status_code == 200:
-                return _parse(resp.json(), resp.headers, latency)
+                parsed = _parse(resp.json(), resp.headers, latency)
+                from dataclasses import replace
+                return replace(parsed, cost_usd=cost_of(request.model, parsed.usage))
             detail = resp.text[:300]
             if resp.status_code in (401, 403):
                 raise ModelError("model_unavailable", f"gateway refused credentials ({resp.status_code}): {detail}")

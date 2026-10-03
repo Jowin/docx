@@ -27,9 +27,16 @@ def config_root(tmp_path: Path) -> Path:
     return dst
 
 
+def data_of(response) -> list:
+    """The records, whether the result came back plain (clean) or extended (flagged)."""
+    body = response.json() if hasattr(response, "json") else response
+    return body["data"] if isinstance(body, dict) else body
+
+
 @pytest.fixture
 def settings(config_root: Path, input_root: Path, tmp_path: Path) -> Settings:
-    return Settings(config_root=config_root, input_root=input_root, audit_dir=tmp_path / "audit")
+    return Settings(config_root=config_root, input_root=input_root, audit_dir=tmp_path / "audit",
+                    state_dir=tmp_path / "state", workers=0)
 
 
 @pytest.fixture

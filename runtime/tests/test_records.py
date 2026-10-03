@@ -30,7 +30,7 @@ def test_one_record_per_row_when_a_table_has_the_key_column(client):
     assert [d["total_amount"] for d in e["data"]] == [1250, 980.4, 3100]
     assert [rec["fields"]["vendor"]["source"] for rec in e["records"]] == [
         "file:invoices.csv#D2", "file:invoices.csv#D3", "file:invoices.csv#D4"]
-    assert all(rec["status"] == "extracted" for rec in e["records"])
+    assert all(rec["flagged"] is False for rec in e["records"])
     assert e["metadata"]["record_count"] == 3 and r.headers["x-extraction-status"] == "extracted"
 
 
@@ -90,8 +90,8 @@ def test_content_that_fits_no_record_is_flagged(client, input_root):
         m.add_attachment(_pdf(no, total), maintype="application", subtype="pdf", filename=f"{no}.pdf")
     (input_root / "loose.eml").write_bytes(bytes(m))
     e = client.post("/extract", json={"file_location": "loose.eml", "extended": True}).json()
-    assert len(e["data"]) == 2 and "unplaced_content" in e["review_reasons"]
-    assert e["status"] == "review"
+    assert len(e["data"]) == 2 and "unplaced_content" in e["flags"]
+    assert e["status"] == "extracted" and e["flagged"] is True
 
 
 def test_single_record_is_still_an_array(client):
@@ -110,8 +110,8 @@ def test_model_path_returns_several_records_and_invented_ones_fail(settings):
     assert e["records"][0]["data"]["invoice_number"] == "INV-20194"
     bad = e["records"][1]
     assert bad["data"]["invoice_number"] is None and bad["data"]["total_amount"] is None
-    assert "unverified_value:invoice_number" in bad["review_reasons"] and bad["status"] == "review"
-    assert e["status"] == "review"
+    assert "unverified_value:invoice_number" in bad["flags"] and bad["flagged"] is True
+    assert e["status"] == "extracted" and e["flagged"] is True
 
 
 def test_record_key_must_name_a_scalar_field():

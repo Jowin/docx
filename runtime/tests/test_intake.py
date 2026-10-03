@@ -15,6 +15,10 @@ def _zip(members: dict[str, bytes]) -> bytes:
     return buf.getvalue()
 
 
+def _files(sub):
+    return [i for i in sub.items if i.kind != "email_body"]
+
+
 def test_kind_comes_from_bytes_not_extension():
     assert detect_kind(statement_csv()) == "csv"
     assert detect_kind(invoice_xlsx()) == "excel"
@@ -57,20 +61,40 @@ def test_zip_attached_to_email_is_unpacked_with_attachment_sources():
     msg.add_attachment(_zip({"s.csv": statement_csv()}), maintype="application", subtype="zip",
                        filename="s.zip")
     sub = open_submission("m.eml", "m.eml", bytes(msg), DEFAULT_INTAKE)
-    assert [i.source_prefix for i in sub.items] == ["attachment:s.zip/s.csv"]
+    assert [i.source_prefix for i in _files(sub)] == ["attachment:s.zip/s.csv"]
+    assert sub.items[0].source_prefix == "body" and sub.items[0].kind == "email_body"
 
 
-def test_attached_email_is_flagged_not_read():
+def test_attached_email_is_read_recursively():
     inner = EmailMessage()
     inner["Subject"] = "old"
-    inner.set_content("old thread")
+    inner["From"] = "billing@hooli.example"
+    inner.set_content("old thread\nTotal due: $7.00")
+    inner.add_attachment(statement_csv(), maintype="text", subtype="csv", filename="s.csv")
     msg = EmailMessage()
     msg["Subject"] = "Fwd"
     msg.set_content("forwarding")
     msg.add_attachment(inner)
     sub = open_submission("f.eml", "f.eml", bytes(msg), DEFAULT_INTAKE)
-    assert sub.skipped[0]["reason"] == "embedded_email"
-    assert "embedded_email_not_supported" in sub.reasons
+    assert [(i.kind, i.source_prefix) for i in sub.items] == [
+        ("email_body", "body"), ("email_body", "embedded:1:old.eml"), ("csv", "embedded:1:old.eml/s.csv")]
+    assert sub.items[1].meta == {"subject": "old", "sender": "billing@hooli.example", "depth": 1}
+    assert sub.reasons == []
+
+
+def test_embedded_depth_is_checked_before_recursing():
+    inner = EmailMessage()
+    inner["Subject"] = "deep"
+    inner.set_content("deepest")
+    for level in range(3):
+        outer = EmailMessage()
+        outer["Subject"] = f"level {level}"
+        outer.set_content("fwd")
+        outer.add_attachment(inner)
+        inner = outer
+    sub = open_submission("f.eml", "f.eml", bytes(inner), {**DEFAULT_INTAKE, "max_email_depth": 2})
+    assert [i.meta["depth"] for i in sub.items] == [0, 1, 2]
+    assert sub.skipped[-1]["reason"] == "embedded_depth_exceeded" and "embedded_depth_exceeded" in sub.reasons
 
 
 def test_duplicate_attachment_names_kept_apart():
@@ -79,7 +103,7 @@ def test_duplicate_attachment_names_kept_apart():
     for _ in range(2):
         msg.add_attachment(statement_csv(), maintype="text", subtype="csv", filename="s.csv")
     sub = open_submission("d.eml", "d.eml", bytes(msg), DEFAULT_INTAKE)
-    assert [i.name for i in sub.items] == ["s.csv", "s (2).csv"]
+    assert [i.name for i in _files(sub)] == ["s.csv", "s (2).csv"]
 
 
 def test_html_only_email_body_becomes_text():

@@ -11,6 +11,9 @@ what the dictionary's aliases name:
   anchor in a line        "... please pay $1,200.00 by ..." for a field whose
                           learned anchors include "please pay"
 
+Older messages in an email thread (segment > 0) and OCR'd text score lower
+than the newest message and text-layer content.
+
 Records. The answer is a list of records keyed by the dictionary's
 ``record_key``:
   * A table with a key column ("Invoice No") gives one record per key value;
@@ -131,6 +134,11 @@ class StubModel:
         value, err = normalize(f, raw, date_order=self.date_order)
         if value is None or err:
             return
+        if block.segment:                       # an older message in the thread counts for less
+            score -= 0.05 * min(block.segment, 3)
+        if block.confidence is not None:        # OCR'd text: scaled by the OCR engine's confidence
+            score *= 0.85 + 0.15 * block.confidence
+        score = round(score, 4)
         candidates[f.name].append({
             "value": raw if not isinstance(raw, (int, float)) else str(raw),
             "source": f"{doc.doc_id}#{block.locator}", "confidence": score,

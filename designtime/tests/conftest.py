@@ -68,6 +68,18 @@ def registry(db_session) -> Registry:
     return Registry(db_session)
 
 
+def _drop_langgraph_tables(engine) -> None:
+    """LangGraph's store and checkpointer keep their own tables; start each test without them."""
+    from sqlalchemy import text
+
+    from dataextractor_designtime.learning.memory import reset_setup_cache
+    with engine.begin() as conn:
+        for table in ("store", "store_vectors", "store_migrations", "vector_migrations", "checkpoints",
+                      "checkpoint_blobs", "checkpoint_writes", "checkpoint_migrations"):
+            conn.execute(text(f'DROP TABLE IF EXISTS "{table}" CASCADE'))
+    reset_setup_cache()
+
+
 @pytest.fixture()
 def client(db_url: str):
     from fastapi.testclient import TestClient
@@ -78,6 +90,7 @@ def client(db_url: str):
     engine = _ge(db_url)
     Base.metadata.drop_all(engine)
     Base.metadata.create_all(engine)
+    _drop_langgraph_tables(engine)
     app.state.database_url = db_url
     with TestClient(app) as c:
         yield c

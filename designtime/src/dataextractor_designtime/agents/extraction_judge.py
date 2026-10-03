@@ -7,14 +7,14 @@ Two modes, chosen by whether ground truth was supplied:
   ``record_key`` when the ground truth carries it, otherwise by position; records
   whose key was missed pair up by position with what is left).
   Missing and extra records are failures. With ``strict`` (default) any
-  review status is a failure too, so a correct value the runtime was not
-  confident about still asks for a skill.
-* ``review_status`` - no ground truth, so the runtime's own verdict is the
-  test: any review reason (missing required field, unverified value, low
-  confidence, unplaced content, ...) is a failure.
+  flag is a failure too, so a correct value the runtime was not confident
+  about still asks for a skill.
+* ``flags`` - no ground truth, so the runtime's own verdict is the test: any
+  flag (missing required field, unverified value, low confidence, unplaced
+  content, a skipped attachment, ...) is a failure.
 
 The score orders outcomes for the learning loop: fewer value failures first,
-then fewer review failures. All of this is mechanical; nothing here needs a
+then fewer flags. All of this is mechanical; nothing here needs a
 model.
 """
 
@@ -30,7 +30,7 @@ from .base import AgentError, DesignAgent
 
 FailureKind = Literal[
     "mismatch", "missing_value", "unexpected_value", "missing_record", "extra_record",
-    "item_count", "item_mismatch", "review",
+    "item_count", "item_mismatch", "flag",
 ]
 _TRUE = {"true", "yes", "y", "1"}
 _FALSE = {"false", "no", "n", "0"}
@@ -45,20 +45,20 @@ class Failure(Record):
     actual: Any = None
     #: CTR-13 source the runtime cited for the actual value, when it cited one.
     source: str | None = None
-    #: The runtime's review reason, for ``review`` failures.
+    #: The runtime's flag, for ``flag`` failures.
     reason: str | None = None
 
 
 @dataclass(kw_only=True)
 class Score(Record):
     value_failures: int = 0
-    review_failures: int = 0
+    flag_failures: int = 0
     fields_checked: int = 0
     fields_correct: int = 0
 
     def key(self) -> tuple[int, int]:
         """Lower is better."""
-        return (self.value_failures, self.review_failures)
+        return (self.value_failures, self.flag_failures)
 
 
 @dataclass(kw_only=True)
@@ -67,7 +67,7 @@ class ExtractionJudgeInput(Record):
     output: dict[str, Any]
     #: The data dictionary the runtime used (its ``describe()``).
     dictionary: dict[str, Any]
-    #: Expected records for this source; omit to judge on review status alone.
+    #: Expected records for this source; omit to judge on the runtime's flags alone.
     ground_truth: list[dict[str, Any]] | None = None
     strict: bool = True
 
@@ -75,8 +75,9 @@ class ExtractionJudgeInput(Record):
 @dataclass(kw_only=True)
 class ExtractionJudgeOutput(Record):
     passed: bool
-    mode: Literal["ground_truth", "review_status"]
-    status: str
+    mode: Literal["ground_truth", "flags"]
+    #: The runtime flagged the result.
+    flagged: bool
     failures: list[Failure] = field(default_factory=list)
     #: Top-level dictionary fields a skill should address, in dictionary order.
     failing_fields: list[str] = field(default_factory=list)
@@ -148,7 +149,7 @@ class ExtractionJudge(DesignAgent[ExtractionJudgeInput, ExtractionJudgeOutput]):
         out = payload.output
         data = out.get("data") or []
         records = out.get("records") or [{} for _ in data]
-        status = str(out.get("status", "review"))
+        flagged = bool(out.get("flagged", out.get("status") not in (None, "extracted")))
 
         failures: list[Failure] = []
         checked = correct = 0
@@ -174,29 +175,30 @@ class ExtractionJudge(DesignAgent[ExtractionJudgeInput, ExtractionJudgeOutput]):
                                         actual=data[di].get(key) if key else None))
         value_failures = len(failures)
 
-        review: list[Failure] = []
+        flags: list[Failure] = []
         if payload.ground_truth is None or payload.strict:
-            per_record = [(i, r) for i, rec in enumerate(records) for r in rec.get("review_reasons", [])]
+            per_record = [(i, r) for i, rec in enumerate(records)
+                          for r in rec.get("flags", rec.get("review_reasons", []))]
             seen = {r for _, r in per_record}
             for i, r in per_record:
-                review.append(Failure(kind="review", record=i, reason=r, field=field_of_reason(r, names)))
-            for r in out.get("review_reasons", []):
+                flags.append(Failure(kind="flag", record=i, reason=r, field=field_of_reason(r, names)))
+            for r in out.get("flags", out.get("review_reasons", [])):
                 if r not in seen:
-                    review.append(Failure(kind="review", reason=r, field=field_of_reason(r, names)))
-            if status != "extracted" and not review:
-                review.append(Failure(kind="review", reason=f"status:{status}"))
-        failures.extend(review)
+                    flags.append(Failure(kind="flag", reason=r, field=field_of_reason(r, names)))
+            if flagged and not flags:
+                flags.append(Failure(kind="flag", reason="flagged"))
+        failures.extend(flags)
 
         failing = {f.field for f in failures if f.field}
         # a missing or extra record is about the key; low confidence is about whichever
         # required field scored lowest, which the writer works out from the evidence
         return ExtractionJudgeOutput(
             passed=not failures,
-            mode="ground_truth" if payload.ground_truth is not None else "review_status",
-            status=status,
+            mode="ground_truth" if payload.ground_truth is not None else "flags",
+            flagged=flagged,
             failures=failures,
             failing_fields=[n for n in spec if n in failing],
-            score=Score(value_failures=value_failures, review_failures=len(review),
+            score=Score(value_failures=value_failures, flag_failures=len(flags),
                         fields_checked=checked, fields_correct=correct),
         )
 

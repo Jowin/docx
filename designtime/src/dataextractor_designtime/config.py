@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import os
 import sys
+import tempfile
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -56,6 +57,12 @@ class Settings:
     learning_regression_samples: int = field(
         default_factory=lambda: int(os.getenv("LEARNING_REGRESSION_SAMPLES", "20")))
     runtime_timeout_s: float = field(default_factory=lambda: float(os.getenv("RUNTIME_TIMEOUT_S", "300")))
+    #: Scratch copies of the configs for in-flight learning calls; kept until a call finishes,
+    #: so an interrupted call can resume. Put it on a volume in a deployment.
+    learning_state_dir: Path = field(default_factory=lambda: _path_env(
+        "LEARNING_STATE_DIR", Path(tempfile.gettempdir()) / "dataextractor-learning"))
+    #: The runtime service, for fetching reviewer corrections (GET /review/corrections/export).
+    runtime_url: str | None = field(default_factory=lambda: os.getenv("RUNTIME_URL") or None)
     #: When set, judgment tasks the gateway client knows go through the model gateway.
     model_gateway_url: str | None = field(default_factory=lambda: os.getenv("MODEL_GATEWAY_URL") or None)
 
