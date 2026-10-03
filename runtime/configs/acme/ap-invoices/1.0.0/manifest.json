@@ -1,0 +1,38 @@
+{
+  "client": "acme",
+  "usecase": "ap-invoices",
+  "version": "1.0.0",
+  "description": "Acme accounts payable: supplier invoices by email.",
+  "model": {
+    "provider": "gateway",
+    "name": "default",
+    "max_tokens": 4096
+  },
+  "skills": [
+    "field-extraction",
+    "table-extraction"
+  ],
+  "thresholds": {
+    "accept_at": 0.85
+  },
+  "evidence": {
+    "rows": 200,
+    "tail_rows": 10,
+    "pages": 10,
+    "tail_pages": 1,
+    "max_sheets": 5,
+    "max_chars_per_document": 60000
+  },
+  "intake": {
+    "max_zip_members": 200,
+    "max_zip_uncompressed_mb": 200,
+    "max_compression_ratio": 100,
+    "max_zip_depth": 1
+  },
+  "locale": {
+    "date_order": "DMY"
+  },
+  "output": {
+    "decimal_format": "string"
+  }
+}

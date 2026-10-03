@@ -1,0 +1,10 @@
+[project]
+name = "dataextractor-runtime"
+version = "0.1.0"
+description = "DataExtractor runtime: extract dictionary-defined fields from CSV, Excel, PDF, email and zip inputs"
+requires-python = ">=3.11"
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = ["."]
+filterwarnings = ["ignore::DeprecationWarning"]

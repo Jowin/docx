@@ -1,0 +1,159 @@
+{
+  "name": "invoice",
+  "version": "1.1.0",
+  "description": "Supplier invoice header and line items.",
+  "record_key": "invoice_number",
+  "fields": [
+    {
+      "name": "invoice_number",
+      "type": "string",
+      "required": true,
+      "description": "The supplier's invoice identifier.",
+      "aliases": [
+        "invoice no",
+        "invoice number",
+        "invoice #",
+        "inv no",
+        "invoice"
+      ]
+    },
+    {
+      "name": "invoice_date",
+      "type": "date",
+      "required": true,
+      "description": "Date the invoice was issued.",
+      "aliases": [
+        "invoice date",
+        "date of issue",
+        "issue date",
+        "date"
+      ]
+    },
+    {
+      "name": "due_date",
+      "type": "date",
+      "description": "Date payment is due.",
+      "aliases": [
+        "due date",
+        "payment due",
+        "due"
+      ]
+    },
+    {
+      "name": "vendor",
+      "type": "string",
+      "required": true,
+      "description": "The supplier issuing the invoice.",
+      "aliases": [
+        "vendor",
+        "supplier",
+        "from",
+        "remit to",
+        "seller"
+      ]
+    },
+    {
+      "name": "currency",
+      "type": "string",
+      "grounding": "optional",
+      "description": "ISO 4217 code of the invoice currency, inferred from symbols if not written.",
+      "aliases": [
+        "currency"
+      ]
+    },
+    {
+      "name": "total_amount",
+      "type": "decimal",
+      "required": true,
+      "critical": true,
+      "description": "Total amount due, including tax.",
+      "aliases": [
+        "total due",
+        "amount due",
+        "invoice total",
+        "grand total",
+        "total amount",
+        "total",
+        "balance due"
+      ]
+    },
+    {
+      "name": "tax_amount",
+      "type": "decimal",
+      "description": "Total tax charged.",
+      "aliases": [
+        "tax",
+        "vat",
+        "gst",
+        "sales tax",
+        "tax amount"
+      ]
+    },
+    {
+      "name": "po_number",
+      "type": "string",
+      "description": "The buyer's purchase order number.",
+      "aliases": [
+        "po number",
+        "po no",
+        "purchase order",
+        "po #",
+        "po"
+      ]
+    },
+    {
+      "name": "payment_reference",
+      "type": "string",
+      "description": "Reference the buyer must quote when paying.",
+      "aliases": [
+        "payment reference",
+        "remittance reference",
+        "reference"
+      ]
+    },
+    {
+      "name": "line_items",
+      "type": "array",
+      "description": "One entry per billed line.",
+      "items": [
+        {
+          "name": "description",
+          "type": "string",
+          "aliases": [
+            "description",
+            "item",
+            "details",
+            "service"
+          ]
+        },
+        {
+          "name": "quantity",
+          "type": "decimal",
+          "aliases": [
+            "qty",
+            "quantity",
+            "units"
+          ]
+        },
+        {
+          "name": "unit_price",
+          "type": "decimal",
+          "aliases": [
+            "unit price",
+            "rate",
+            "price"
+          ]
+        },
+        {
+          "name": "amount",
+          "type": "decimal",
+          "aliases": [
+            "amount",
+            "line total",
+            "total"
+          ]
+        }
+      ]
+    }
+  ]
+}
