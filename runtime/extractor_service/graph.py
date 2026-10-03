@@ -25,7 +25,6 @@ from __future__ import annotations
 import hashlib
 import operator
 import time
-from pathlib import Path
 from typing import Annotated, Any, Callable, TypedDict
 
 from langgraph.graph import END, START, StateGraph
@@ -55,7 +54,7 @@ class RunState(TypedDict, total=False):
     client: str | None
     usecase: str | None
     version: str | None
-    spool_dir: str | None
+    spool_run: str | None              # the run id whose spool holds item bytes (jobs); None = in memory
     started: float
     # produced by nodes
     cfg: ExtractionConfig
@@ -82,7 +81,7 @@ class RunState(TypedDict, total=False):
 class ParseTask(TypedDict):
     item: Item
     evidence: dict[str, Any]
-    spool_dir: str | None
+    spool_run: str | None
     timeout_s: float
 
 
@@ -98,13 +97,16 @@ def _timed(name: str, fn: Callable[[Any], dict[str, Any]]) -> Callable[[Any], di
     return node
 
 
-def _spool(spool_dir: str | None, settings: Any) -> Spool | None:
-    return Spool(Path(spool_dir), getattr(settings, "state_key", None)) if spool_dir else None
+def build_graph(store: ConfigStore, settings: Any, gateway: Gateway | None = None, checkpointer: Any = None,
+                pool: Any = None):
+    """Compile the pipeline. ``settings`` is pipeline.Settings (passed in to avoid a cycle).
 
-
-def build_graph(store: ConfigStore, settings: Any, gateway: Gateway | None = None, checkpointer: Any = None):
-    """Compile the pipeline. ``settings`` is pipeline.Settings (passed in to avoid a cycle)."""
+    ``pool`` (a Postgres connection pool) backs the spool; without it item bytes stay in memory.
+    """
     from .pipeline import resolve_location
+
+    def _spool(run_id: str | None) -> Spool | None:
+        return Spool(pool, run_id, getattr(settings, "state_key", None)) if (run_id and pool is not None) else None
 
     def resolve_config(state: RunState) -> dict[str, Any]:
         cfg = store.resolve(state.get("client"), state.get("usecase"), state.get("version"))
@@ -116,7 +118,7 @@ def build_graph(store: ConfigStore, settings: Any, gateway: Gateway | None = Non
         cfg = state["cfg"]
         path = resolve_location(settings, state["file_location"])
         ctx = IntakeContext(limits=cfg.intake, filter=cfg.ingestion_filter, client=cfg.client,
-                            usecase=cfg.usecase, spool=_spool(state.get("spool_dir"), settings))
+                            usecase=cfg.usecase, spool=_spool(state.get("spool_run")))
         sub = open_submission(state["file_location"], path.name, path.read_bytes(), ctx)
         unreadable = sub.kind not in SUPPORTED_INPUTS or (sub.kind == "image" and not sub.items)
         if sub.ignored is None and unreadable and "encrypted_no_key" not in sub.reasons:
@@ -134,11 +136,11 @@ def build_graph(store: ConfigStore, settings: Any, gateway: Gateway | None = Non
         if not items:
             return "assemble"
         ev = state["cfg"].evidence
-        return [Send("parse_item", ParseTask(item=i, evidence=ev, spool_dir=state.get("spool_dir"),
+        return [Send("parse_item", ParseTask(item=i, evidence=ev, spool_run=state.get("spool_run"),
                                              timeout_s=float(ev.get("parse_timeout_s", 120)))) for i in items]
 
     def parse_item(task: ParseTask) -> dict[str, Any]:
-        doc = sandbox.parse(task["item"], task["evidence"], _spool(task.get("spool_dir"), settings),
+        doc = sandbox.parse(task["item"], task["evidence"], _spool(task.get("spool_run")),
                             mode=settings.parse_sandbox, timeout_s=task["timeout_s"],
                             memory_mb=settings.sandbox_memory_mb)
         return {"parsed": [doc]}

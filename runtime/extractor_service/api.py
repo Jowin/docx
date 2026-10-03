@@ -31,9 +31,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
-import tempfile
 from contextlib import asynccontextmanager
-from pathlib import Path
 from typing import Any
 
 from fastapi import FastAPI, Request
@@ -45,6 +43,7 @@ from .config_store import ConfigStore
 from .errors import ConfigError, ServiceError
 from .gateway import Gateway
 from .graph import build_graph
+from .db import open_pool
 from .jobs import PUBLIC, JobStore, Runner, check_callback_url, checkpointer
 
 log = logging.getLogger("extractor_service")
@@ -121,7 +120,7 @@ def _job_view(store: JobStore, job: Any, *, with_result: bool = True) -> dict[st
     out: dict[str, Any] = {"job_id": job["id"], "status": PUBLIC[job["status"]],
                            "created_at": job["created_at"], "client": job["client"], "usecase": job["usecase"]}
     if job["status"] == "done":
-        out.update({"flagged": bool(job["flagged"]), "flags": json.loads(job["flags"] or "[]"),
+        out.update({"flagged": bool(job["flagged"]), "flags": job["flags"] or [],
                     "audit_id": job["audit_id"], "human_corrected": bool(job["human_corrected"]),
                     "finished_at": job["finished_at"], "dead_lettered": bool(job["dead"])})
         if with_result:
@@ -139,12 +138,14 @@ def create_app(settings: pipeline.Settings | None = None, model_gateway: Gateway
     process while the app is up; ``http`` replaces the webhook HTTP client (tests).
     """
     settings = settings or pipeline.Settings.from_env()
-    state_dir = settings.state_dir or Path(tempfile.mkdtemp(prefix="extractor-state-"))
+    if not settings.database_url:
+        raise RuntimeError("DATABASE_URL must point at Postgres: jobs, results, review and checkpoints live there")
     store = ConfigStore(settings.config_root)
     problems = store.validate_all()
-    saver = checkpointer(state_dir)
-    graph = build_graph(store, settings, model_gateway, checkpointer=saver)
-    jobs = JobStore(state_dir)
+    pool = open_pool(settings.database_url, settings.db_schema, max_size=max(4, settings.workers + 4))
+    saver = checkpointer(pool)
+    graph = build_graph(store, settings, model_gateway, checkpointer=saver, pool=pool)
+    jobs = JobStore(pool)
     runner = Runner(jobs, graph, settings, checkpointer=saver, http=http)
     run_workers = settings.workers > 0 if start_workers is None else start_workers
 
@@ -155,6 +156,7 @@ def create_app(settings: pipeline.Settings | None = None, model_gateway: Gateway
         yield
         if run_workers:
             runner.stop()
+        pool.close()
 
     app = FastAPI(title="DataExtractor runtime", version=pipeline.ENGINE_VERSION, lifespan=lifespan,
                   description="Extract fields defined by a data dictionary from email, zip, CSV, Excel, PDF "
@@ -246,7 +248,7 @@ def create_app(settings: pipeline.Settings | None = None, model_gateway: Gateway
     @app.get("/review")
     def review(status: str | None = "open", client: str | None = None, limit: int = 50) -> list[dict[str, Any]]:
         return [{"job_id": r["job_id"], "audit_id": r["audit_id"], "client": r["client"], "usecase": r["usecase"],
-                 "flags": json.loads(r["flags"] or "[]"), "status": r["status"], "opened_at": r["opened_at"],
+                 "flags": r["flags"] or [], "status": r["status"], "opened_at": r["opened_at"],
                  "resolved_at": r["resolved_at"], "reviewer": r["reviewer"]}
                 for r in jobs.review_list(status=status or None, client=client, limit=limit)]
 
@@ -259,7 +261,7 @@ def create_app(settings: pipeline.Settings | None = None, model_gateway: Gateway
         entry, job = jobs.review_get(job_id), jobs.get(job_id)
         if entry is None or job is None:
             raise ServiceError(404, "review_not_found", f"no review entry for {job_id}")
-        return {"job_id": job_id, "status": entry["status"], "flags": json.loads(entry["flags"] or "[]"),
+        return {"job_id": job_id, "status": entry["status"], "flags": entry["flags"] or [],
                 "reviewer": entry["reviewer"], "note": entry["note"],
                 "result": json.loads(job["result"]),
                 "original_result": json.loads(job["original_result"]) if job["original_result"] else None}
@@ -325,12 +327,22 @@ def create_app(settings: pipeline.Settings | None = None, model_gateway: Gateway
     def graph_mermaid() -> str:
         return graph.get_graph().draw_mermaid()
 
+    def _db_health() -> dict[str, Any]:
+        try:
+            with pool.connection(timeout=5) as conn:
+                conn.execute("SELECT 1")
+            return {"reachable": True, "schema": settings.db_schema}
+        except Exception as exc:                               # noqa: BLE001 - reported, not raised
+            return {"reachable": False, "schema": settings.db_schema, "detail": str(exc).splitlines()[0][:200]}
+
     @app.get("/health")
     def health() -> dict[str, Any]:
         from . import ocr
-        return {"status": "ok" if not problems else "degraded", "engine_version": pipeline.ENGINE_VERSION,
+        db = _db_health()
+        return {"status": "ok" if not problems and db["reachable"] else "degraded",
+                "engine_version": pipeline.ENGINE_VERSION,
                 "config_root": str(settings.config_root), "input_root": str(settings.input_root),
-                "state_dir": str(state_dir), "workers": settings.workers if run_workers else 0,
+                "database": db, "workers": settings.workers if run_workers else 0,
                 "parse_sandbox": settings.parse_sandbox, "ocr_available": ocr.available(),
                 "model_provider_override": settings.model_provider, "config_problems": problems}
 

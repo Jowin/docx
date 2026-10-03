@@ -8,7 +8,6 @@ import hmac
 import io
 import json
 import shutil
-import sqlite3
 import threading
 import zipfile
 from dataclasses import replace
@@ -269,7 +268,7 @@ def test_engine_fault_retries_then_dead_letters_with_a_result(settings, monkeypa
                                                  "callback_url": "https://erp.example/h"}).json()["job_id"]
     app.state.runner.drain()
     row = app.state.jobs.get(job)
-    assert row["attempts"] == 2 and row["dead"] == 1 and row["status"] == "done"
+    assert row["attempts"] == 2 and row["dead"] is True and row["status"] == "done"
     body = hooks.calls[0]["body"]
     assert body["flagged"] is True and body["result"]["flags"] == ["error:internal_error", "dead_lettered"]
 
@@ -294,7 +293,7 @@ def test_a_run_interrupted_mid_graph_resumes_from_its_checkpoint(settings, monke
     first = app.state.jobs.claim("w1", 60)
     app.state.runner.execute(first)                 # fails mid-graph: back in the queue
     assert app.state.jobs.get(job)["status"] == "queued" and sorted(parsed) == ["INV-20194.xlsx", "email body"]
-    app.state.jobs.db.execute("UPDATE jobs SET available_at=0 WHERE id=?", (job,))
+    app.state.jobs._exec("UPDATE jobs SET available_at=0 WHERE id=%s", (job,))
     app.state.runner.drain()
     row = app.state.jobs.get(job)
     assert row["status"] == "done" and json.loads(row["result"])["data"][0]["invoice_number"] == "INV-20194"
@@ -340,7 +339,7 @@ def test_audit_chain_detects_tampering(settings):
     c.post("/extract", json={"file_location": "statement.csv"})
     c.post("/extract", json={"file_location": "invoice.pdf"})
     assert c.get("/audit/verify").json()["ok"] is True
-    app.state.jobs.db.execute("UPDATE jobs SET result=replace(result, 'INV-30001', 'INV-HACKED')")
+    app.state.jobs._exec("UPDATE jobs SET result=replace(result, 'INV-30001', 'INV-HACKED')")
     v = c.get("/audit/verify").json()
     assert v["ok"] is False and v["reason"] == "record_changed"
 
@@ -362,10 +361,11 @@ def test_retention_sweep_removes_spools_and_checkpoints(settings):
     c = TestClient(app)
     job = c.post("/extract", json={"file_location": "invoice-email.eml", "async": True}).json()["job_id"]
     app.state.runner.drain()
-    assert app.state.jobs.spool_dir(job).exists()
+    spooled = app.state.jobs._one("SELECT count(*) AS n FROM spool WHERE run_id=%s", (job,))["n"]
+    assert spooled == 2                                  # the body and the workbook, by reference
     removed = app.state.jobs.sweep(90, app.state.runner.checkpointer)
     assert removed["spools"] == 1 and removed["checkpoints"] == 1
-    assert not app.state.jobs.spool_dir(job).exists()
+    assert app.state.jobs._one("SELECT count(*) AS n FROM spool WHERE run_id=%s", (job,))["n"] == 0
 
 
 # ------------------------------------------------------------------ documents
@@ -523,7 +523,7 @@ def test_worker_process_drains_the_shared_queue(settings, tmp_path):
     app = _app(settings)
     job = TestClient(app).post("/extract", json={"file_location": "statement.csv", "async": True}).json()["job_id"]
     env = {**os.environ, "CONFIG_ROOT": str(settings.config_root), "INPUT_ROOT": str(settings.input_root),
-           "STATE_DIR": str(settings.state_dir)}
+           "DATABASE_URL": settings.database_url, "DB_SCHEMA": settings.db_schema}
     p = subprocess.run([sys.executable, "-m", "extractor_service.worker", "--drain"], env=env,
                        cwd=str(Path(__file__).parents[1]), capture_output=True, text=True, timeout=120)
     assert p.returncode == 0, p.stderr

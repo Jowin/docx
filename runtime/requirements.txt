@@ -18,9 +18,10 @@ langgraph-checkpoint==4.2.0
 langchain-core==1.6.6
 PyYAML==6.0.3             # skill front matter
 zen-engine==2.1.2        # ingestion filter decisions held as lookup data
-langgraph-checkpoint-sqlite==3.1.1  # run checkpoints: resume after a lost worker
-aiosqlite==0.22.1          # required by langgraph-checkpoint-sqlite
-sqlite-vec==0.1.9          # required by langgraph-checkpoint-sqlite
+langgraph-checkpoint-postgres==3.1.2  # run checkpoints in Postgres: resume after a lost worker
+psycopg==3.3.6            # Postgres: jobs, deliveries, review, audit chain, spool
+psycopg-binary==3.3.6
+psycopg-pool==3.3.3
 msoffcrypto-tool==6.0.0     # opens password-protected Office files (MIT)
 pypdfium2==5.7.1          # renders scanned PDF pages for OCR (also used by pdfplumber)
 pillow==12.2.0            # image handling for OCR

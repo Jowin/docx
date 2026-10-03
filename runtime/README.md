@@ -3,8 +3,8 @@
 Extracts the fields a data dictionary defines from an email (`.eml` or Outlook
 `.msg`, attached emails included), a zip, or a single CSV, Excel (`.xlsx`,
 `.xlsm`, `.xls`), PDF (scanned pages by OCR) or DOCX file. One FastAPI service
-and one self-contained Docker image. It answers synchronously, by webhook, or
-by polling. The pipeline is a LangGraph state graph, every model call goes
+and one self-contained Docker image, with its state in Postgres. It answers
+synchronously, by webhook, or by polling. The pipeline is a LangGraph state graph, every model call goes
 through one gateway function, and no pydantic is imported by this code.
 
 ```
@@ -26,13 +26,16 @@ GET  /configs, /graph, /health, /docs
 
 ```
 docker build -t dataextractor-runtime .
-docker run --rm -p 8000:8000 -v D:\data:/data -v extractor-state:/state dataextractor-runtime
+docker run --rm -p 8000:8000 -v D:\data:/data ^
+  -e DATABASE_URL=postgresql://user:pass@dbhost:5432/extractor dataextractor-runtime
 ```
 
 Input files go in the mounted `/data` folder; `file_location` is relative to it.
-`/state` holds the job queue, checkpoints, the spool and the audit chain. Mount
-a volume there, shared by every API and worker container of one deployment. To
-use your own configs, add `-v D:\configs:/app/configs`. For configs that use a
+Jobs, results, deliveries, the review queue, the audit chain, spooled
+attachment bytes and LangGraph checkpoints all live in Postgres, in the schema
+`DB_SCHEMA` (default `extractor`, created on start). Containers keep no state,
+so API and worker containers scale out freely. To use your own configs, add
+`-v D:\configs:/app/configs`. For configs that use a
 model, add `-e MODEL_GATEWAY_URL=... -e MODEL_GATEWAY_TOKEN=...`. More workers:
 `docker run ... dataextractor-runtime python -m extractor_service.worker`.
 
@@ -41,6 +44,7 @@ model, add `-e MODEL_GATEWAY_URL=... -e MODEL_GATEWAY_TOKEN=...`. More workers:
 ```
 pip install -r requirements.txt         (tesseract on PATH for OCR, optional)
 set INPUT_ROOT=D:\data                  (export INPUT_ROOT=... on macOS/Linux)
+set DATABASE_URL=postgresql://user:pass@localhost:5432/extractor
 uvicorn extractor_service.api:app --port 8000
 ```
 
@@ -49,7 +53,8 @@ uvicorn extractor_service.api:app --port 8000
 ```
 pip install -r requirements-dev.txt
 python -m tests.samples D:\data     # writes eight sample inputs
-pytest                              # 202 tests (service, platform and reader tools)
+set TEST_DATABASE_URL=postgresql://user:pass@localhost:5432/extractor_test
+pytest                              # 202 tests; each test gets (and drops) its own schema
 ```
 
 ## Request
@@ -136,10 +141,11 @@ Extended (flagged, or asked for):
 | `+ "callback_url": "https://erp/hook"` | `202 {"job_id", "status": "inprogress"}` | the result is POSTed to the URL |
 | `+ "async": true` | `202 {"job_id", "status": "inprogress", "poll": "/extractions/<id>"}` | `GET` it until `extracted` |
 
-Every extraction is a job in a durable SQLite queue under `STATE_DIR` (RT-49).
-Workers in the API process (`WORKERS`, default 2), plus any number of
-`python -m extractor_service.worker` processes on the same volume, claim jobs
-with a lease.
+Every extraction is a job in a durable Postgres queue (RT-49). Workers in the API
+process (`WORKERS`, default 2), plus any number of `python -m extractor_service.worker`
+processes on any host pointed at the same database, claim jobs with
+`FOR UPDATE SKIP LOCKED` and a lease. A job's completion (its result, review
+entry, audit-chain entry and webhook delivery) commits in one transaction.
 
 **The webhook** receives:
 
@@ -166,7 +172,7 @@ and, with `WEBHOOK_SECRET` set, `X-Signature: sha256=<HMAC-SHA256 of "<X-Timesta
 - After `JOB_MAX_ATTEMPTS` the job is dead-lettered (RT-56). It still ends in a result flagged `error:internal_error` and `dead_lettered`, and that result is delivered.
 
 **Resume (RT-40).**
-- Every graph node is a LangGraph checkpoint (SQLite, under `STATE_DIR`), and a job's thread is its job id.
+- Every graph node is a LangGraph checkpoint (`PostgresSaver`, in the runtime's schema), and a job's thread is its job id.
 - When a worker dies mid-run, the lease expires, another worker claims the job, and the run continues from its last checkpoint. Nothing already parsed is parsed again.
 - Checkpoint deserialization accepts only the run state's own types.
 
@@ -222,9 +228,12 @@ failed document (`agent_timeout:parse:<name>`), never a hung run. Network
 isolation of the parser is left to the deployment (a container without
 egress).
 
-Item bytes are spooled once per run and referenced from the run state, so
-checkpoints stay small (RT-34). With `STATE_KEY` (a Fernet key) the spool is
-encrypted at rest, and the retention sweep deletes it after the run (RT-35, RT-51).
+Item bytes are spooled once per run into Postgres (`spool`, bytea) and
+referenced from the run state, so checkpoints stay small and any worker can
+resume the run (RT-34). The parent reads the bytes before the sandboxed child
+starts, so no database connection crosses into it. With `STATE_KEY` (a Fernet
+key) the spool is encrypted at rest, and the retention sweep deletes it after
+the run (RT-35, RT-51).
 
 ## Pipeline
 
@@ -371,7 +380,7 @@ A record's confidence is the lowest among its required fields. Below
 ## Review, audit and metrics
 
 - **Review queue (RT-44..48).** Every flagged result opens an entry (`GET /review`). `POST /review/{job_id}/resolve` takes `{"reviewer", "corrections": [{"record", "field", "value"}]}`, or `"records"` to replace them, or `"action": "reject"`. Each change is logged with the original and corrected value, who made it, and when. The corrected result keeps the `audit_id`, is marked `human_corrected` and is delivered again. `GET /review/corrections/export` returns corrected results as ground truth for design-time learning (`POST /learning/corrections`).
-- **Audit.** Every run writes its extended result to `AUDIT_DIR` (RT-06), failures included. Every completed, corrected or rejected result is appended to a SHA-256 hash chain. `GET /audit/verify` checks every link, and that each stored result is the one last chained.
+- **Audit.** Every run writes its extended result to `AUDIT_DIR` (RT-06), failures included. Every completed, corrected or rejected result is appended to a SHA-256 hash chain in Postgres, one appender at a time (an advisory lock). `GET /audit/verify` checks every link, and that each stored result is the one last chained.
 - **Metrics (RT-54).** `GET /metrics` reports, per client and use case: jobs, in progress, flagged and flag rate, corrections, dead letters, p50/p95 latency, cost, and the most common flags. `GET /metrics/prometheus` gives the same in Prometheus text format.
 - **Retention.** A sweep deletes finished jobs' spools and checkpoints, and purges results older than `RETENTION_DAYS` whose review is closed.
 
@@ -390,7 +399,8 @@ isolation when it learns a pattern.
 | `CONFIG_ROOT` | `/app/configs` | Config folders |
 | `INPUT_ROOT` | `/data` | Only files under this folder can be read |
 | `AUDIT_DIR` | `/audit` | One JSON audit record per run; unset to disable |
-| `STATE_DIR` | `/state` | Job queue, checkpoints, spool, audit chain |
+| `DATABASE_URL` | required | Postgres for jobs, results, deliveries, review, audit chain, spool, checkpoints |
+| `DB_SCHEMA` | `extractor` | The schema those tables live in (created if missing) |
 | `STATE_KEY` | unset | Fernet key: encrypts spooled attachments at rest |
 | `WORKERS` | `2` | Queue workers inside the API process (0 = none) |
 | `JOB_MAX_ATTEMPTS`, `JOB_RETRY_BACKOFF_S`, `JOB_LEASE_S` | `3`, `2`, `420` | Engine-fault retries; how long a worker owns a job |
@@ -411,7 +421,7 @@ isolation when it learns a pattern.
 
 ## Limits worth knowing
 
-- **One machine, or one shared volume.** The queue and checkpoints are SQLite on `STATE_DIR`. Many processes on one host (or containers sharing a local volume) scale fine. Across hosts, they need a shared filesystem with working locks, or a managed queue swapped in behind `jobs.py`.
+- **Postgres is required.** The API refuses to start without `DATABASE_URL`; `/health` reports whether the database is reachable. The batch CLI (`extractor_service.cli`) needs no database.
 - **The parser sandbox caps time and memory, not network.** Run the image without egress to complete RT-65.
 - **OCR needs tesseract**, which the image installs. English only by default; add tesseract language packs for others.
 - **`.msg` is read with olefile (BSD) and compressed-rtf (MIT), not the GPL `extract-msg`.** The tests use synthetic files built to the published format; run a few real Outlook exports through before relying on it.

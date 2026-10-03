@@ -3,9 +3,10 @@
     python -m extractor_service.worker              # WORKERS threads + webhook delivery + retention
     python -m extractor_service.worker --drain      # run what is queued, deliver, then exit
 
-Every worker process points at the same STATE_DIR (a shared volume): jobs are
-claimed with a lease, so any number of processes can share the queue, and a
-job whose worker died is picked up again and resumes from its checkpoint.
+Every worker process points at the same Postgres (DATABASE_URL, DB_SCHEMA): jobs
+are claimed with FOR UPDATE SKIP LOCKED and a lease, so any number of processes
+on any number of hosts share the queue, and a job whose worker died is picked
+up again and resumes from its checkpoint. Workers need no shared disk.
 """
 from __future__ import annotations
 
@@ -17,16 +18,18 @@ import threading
 from . import pipeline
 from .config_store import ConfigStore
 from .graph import build_graph
+from .db import open_pool
 from .jobs import JobStore, Runner, checkpointer
 
 
 def build_runner(settings: pipeline.Settings | None = None) -> Runner:
     settings = settings or pipeline.Settings.from_env()
-    if settings.state_dir is None:
-        raise SystemExit("STATE_DIR must be set for workers")
-    saver = checkpointer(settings.state_dir)
-    graph = build_graph(ConfigStore(settings.config_root), settings, checkpointer=saver)
-    return Runner(JobStore(settings.state_dir), graph, settings, checkpointer=saver)
+    if not settings.database_url:
+        raise SystemExit("DATABASE_URL must be set for workers")
+    pool = open_pool(settings.database_url, settings.db_schema, max_size=max(4, settings.workers + 4))
+    saver = checkpointer(pool)
+    graph = build_graph(ConfigStore(settings.config_root), settings, checkpointer=saver, pool=pool)
+    return Runner(JobStore(pool), graph, settings, checkpointer=saver)
 
 
 def main(argv: list[str] | None = None) -> int:

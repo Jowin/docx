@@ -47,8 +47,10 @@ class Settings:
     audit_dir: Path | None = None
     model_provider: str | None = None      # override every config's provider, e.g. "stub"
     max_file_mb: int = 25
-    #: Jobs, checkpoints, the spool and the audit chain live here (None = no jobs store).
-    state_dir: Path | None = None
+    #: Postgres for jobs, deliveries, review, the audit chain, the spool and checkpoints.
+    database_url: str | None = None
+    #: The Postgres schema those tables live in.
+    db_schema: str = "extractor"
     #: Fernet key: encrypts spooled attachment bytes at rest.
     state_key: str | None = None
     parse_sandbox: str = field(default_factory=_default_sandbox)
@@ -70,14 +72,15 @@ class Settings:
     def from_env(cls) -> "Settings":
         here = Path(__file__).resolve().parent.parent
         env = os.environ.get
-        audit, state = env("AUDIT_DIR"), env("STATE_DIR")
+        audit = env("AUDIT_DIR")
         hosts = tuple(h.strip().lower() for h in (env("WEBHOOK_ALLOWED_HOSTS") or "").split(",") if h.strip())
         return cls(config_root=Path(env("CONFIG_ROOT", str(here / "configs"))),
                    input_root=Path(env("INPUT_ROOT", str(here / "data"))),
                    audit_dir=Path(audit) if audit else None,
                    model_provider=env("MODEL_PROVIDER") or None,
                    max_file_mb=int(env("MAX_FILE_MB", "25")),
-                   state_dir=Path(state) if state else here / "state",
+                   database_url=env("DATABASE_URL") or None,
+                   db_schema=env("DB_SCHEMA") or "extractor",
                    state_key=env("STATE_KEY") or None,
                    parse_sandbox=env("PARSE_SANDBOX") or _default_sandbox(),
                    sandbox_memory_mb=int(env("SANDBOX_MEMORY_MB", "1024")),
@@ -139,7 +142,7 @@ def resolve_location(settings: Settings, location: str) -> Path:
 
 def run(graph: Any, settings: Settings, *, file_location: str, client: str | None = None,
         usecase: str | None = None, version: str | None = None, thread_id: str | None = None,
-        spool_dir: str | None = None) -> Outcome:
+        spool_run: str | None = None) -> Outcome:
     """Run the graph to its end and build the result. Never raises for a run-level failure.
 
     With ``thread_id`` (a job id) and a checkpointing graph, an interrupted run
@@ -155,7 +158,7 @@ def run(graph: Any, settings: Settings, *, file_location: str, client: str | Non
             if snap.next:                       # a checkpoint mid-run: carry on from it
                 state = graph.invoke(None, {**config, "max_concurrency": _parallel(snap.values)})
         if state is None:
-            state = graph.invoke({**request, "spool_dir": spool_dir, "started": t0, "trace": [], "timings_ms": {}},
+            state = graph.invoke({**request, "spool_run": spool_run, "started": t0, "trace": [], "timings_ms": {}},
                                  {**config, "max_concurrency": 8})
     except ServiceError as exc:
         return _failed(settings, request, exc.code, str(exc), exc.detail, t0, status=exc.status)

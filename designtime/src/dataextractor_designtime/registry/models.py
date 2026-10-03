@@ -13,7 +13,6 @@ from enum import Enum
 from typing import Any
 
 from sqlalchemy import (
-    JSON,
     Boolean,
     DateTime,
     Enum as SAEnum,
@@ -28,9 +27,9 @@ from sqlalchemy.orm import Mapped, mapped_column, relationship
 
 from .db import Base
 
-#: JSONB on Postgres, plain JSON elsewhere so the suite can also run on SQLite.
-JSONType = JSON().with_variant(JSONB(), "postgresql")
-UUIDType = String(36).with_variant(PGUUID(as_uuid=False), "postgresql")
+#: The registry is Postgres only: JSONB documents and native UUID keys.
+JSONType = JSONB()
+UUIDType = PGUUID(as_uuid=False)
 
 
 def _uuid() -> str:

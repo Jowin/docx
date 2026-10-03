@@ -48,35 +48,42 @@ services:
   runtime:
     build: ../runtime
     container_name: dataextractor-runtime
+    depends_on:
+      postgres:
+        condition: service_healthy
     environment:
       CONFIG_ROOT: /configs
-      STATE_DIR: /state
+      # the runtime's tables live in their own schema of the same database
+      DATABASE_URL: postgresql://designtime:designtime@postgres:5432/designtime
+      DB_SCHEMA: extractor
       WEBHOOK_SECRET: ${WEBHOOK_SECRET:-}
       MODEL_GATEWAY_URL: ${MODEL_GATEWAY_URL:-}
       MODEL_GATEWAY_TOKEN: ${MODEL_GATEWAY_TOKEN:-}
     volumes:
       - ../runtime/configs:/configs:ro
       - ${LEARNING_DATA:-../runtime/data}:/data:ro
-      - runtime-state:/state
     ports:
       - "8001:8000"
 
-  # More queue workers on the same state volume (scale with --scale runtime-worker=N).
+  # More queue workers on the same Postgres queue (scale with --scale runtime-worker=N).
   runtime-worker:
     build: ../runtime
     command: ["python", "-m", "extractor_service.worker"]
+    depends_on:
+      postgres:
+        condition: service_healthy
     environment:
       CONFIG_ROOT: /configs
-      STATE_DIR: /state
+      # the runtime's tables live in their own schema of the same database
+      DATABASE_URL: postgresql://designtime:designtime@postgres:5432/designtime
+      DB_SCHEMA: extractor
       WEBHOOK_SECRET: ${WEBHOOK_SECRET:-}
       MODEL_GATEWAY_URL: ${MODEL_GATEWAY_URL:-}
       MODEL_GATEWAY_TOKEN: ${MODEL_GATEWAY_TOKEN:-}
     volumes:
       - ../runtime/configs:/configs:ro
       - ${LEARNING_DATA:-../runtime/data}:/data:ro
-      - runtime-state:/state
 
 volumes:
   designtime-pgdata:
-  runtime-state:
   learning-state:

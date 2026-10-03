@@ -1,6 +1,8 @@
 from __future__ import annotations
 
+import os
 import shutil
+import uuid
 from pathlib import Path
 
 import pytest
@@ -33,10 +35,26 @@ def data_of(response) -> list:
     return body["data"] if isinstance(body, dict) else body
 
 
+TEST_DATABASE_URL = os.getenv("TEST_DATABASE_URL",
+                              "postgresql://designtime:designtime@127.0.0.1:5432/extractor_test")
+
+
 @pytest.fixture
-def settings(config_root: Path, input_root: Path, tmp_path: Path) -> Settings:
+def db_schema():
+    """A schema of its own for each test, dropped afterwards."""
+    schema = "t_" + uuid.uuid4().hex[:12]
+    yield schema
+    from extractor_service.db import close_all, conninfo
+    close_all()
+    import psycopg
+    with psycopg.connect(conninfo(TEST_DATABASE_URL), autocommit=True) as conn:
+        conn.execute(f'DROP SCHEMA IF EXISTS "{schema}" CASCADE')
+
+
+@pytest.fixture
+def settings(config_root: Path, input_root: Path, tmp_path: Path, db_schema: str) -> Settings:
     return Settings(config_root=config_root, input_root=input_root, audit_dir=tmp_path / "audit",
-                    state_dir=tmp_path / "state", workers=0)
+                    database_url=TEST_DATABASE_URL, db_schema=db_schema, workers=0)
 
 
 @pytest.fixture

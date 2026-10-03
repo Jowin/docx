@@ -22,19 +22,19 @@ COPY extractor_service/ extractor_service/
 COPY configs/ configs/
 
 RUN useradd --system --uid 10001 --home /app extractor \
- && mkdir -p /data /audit /state \
- && chown extractor /data /audit /state
+ && mkdir -p /data /audit \
+ && chown extractor /data /audit
 
-# /state holds the job queue, checkpoints, the spool and the audit chain: mount a
-# volume there, shared by every API and worker container of one deployment.
+# Jobs, results, review, the audit chain, the spool and checkpoints live in
+# Postgres: pass DATABASE_URL (and DB_SCHEMA, default "extractor") at run time.
+# Containers keep no state of their own, so API and worker containers scale out freely.
 ENV CONFIG_ROOT=/app/configs \
     INPUT_ROOT=/data \
     AUDIT_DIR=/audit \
-    STATE_DIR=/state \
+    DB_SCHEMA=extractor \
     WORKERS=2 \
     PARSE_SANDBOX=process \
     MAX_FILE_MB=25
-VOLUME ["/state"]
 # Set STATE_KEY (a Fernet key) to encrypt spooled attachments at rest, and
 # WEBHOOK_SECRET to sign webhook deliveries.
 # Model calls go through the gateway: pass MODEL_GATEWAY_URL and MODEL_GATEWAY_TOKEN

@@ -63,6 +63,14 @@ def parse(item: Item, ev: dict[str, Any], spool: Any = None, *, mode: str = "pro
           timeout_s: float = 120, memory_mb: int = 1024) -> Doc:
     if mode == "off":
         return build_doc(item, ev, spool)
+    if item.data is None:
+        # the parent reads the bytes: a database connection must not cross into the child
+        from dataclasses import replace
+        try:
+            item = replace(item, data=item.read(spool))
+        except Exception as exc:                               # noqa: BLE001 - an unreadable item is a flag
+            return _failed(item, f"attachment_parse_failed:{item.name}", f"spool: {exc}"[:300])
+        spool = None
     ctx = mp.get_context("fork" if "fork" in mp.get_all_start_methods() else "spawn")
     parent, child = ctx.Pipe(duplex=False)
     proc = ctx.Process(target=_child, args=(child, item, ev, spool, memory_mb), daemon=True)

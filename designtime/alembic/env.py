@@ -25,12 +25,22 @@ config.set_main_option("sqlalchemy.url", os.getenv("DATABASE_URL") or get_settin
 target_metadata = Base.metadata
 
 
+def include_object(obj, name, type_, reflected, compare_to):
+    """Manage only the registry's tables. LangGraph's store and checkpointer (learning
+    memory) live in the same database and run their own migrations."""
+    if type_ == "table":
+        return name in target_metadata.tables
+    table = getattr(obj, "table", None)
+    return table is None or table.name in target_metadata.tables
+
+
 def run_migrations_offline() -> None:
     context.configure(
         url=config.get_main_option("sqlalchemy.url"),
         target_metadata=target_metadata,
         literal_binds=True,
         dialect_opts={"paramstyle": "named"},
+        include_object=include_object,
     )
     with context.begin_transaction():
         context.run_migrations()
@@ -43,7 +53,8 @@ def run_migrations_online() -> None:
         poolclass=pool.NullPool,
     )
     with connectable.connect() as connection:
-        context.configure(connection=connection, target_metadata=target_metadata)
+        context.configure(connection=connection, target_metadata=target_metadata,
+                          include_object=include_object)
         with context.begin_transaction():
             context.run_migrations()
 

@@ -1,22 +1,29 @@
-"""Run spool: item bytes stored once per run and referenced from the run state.
+"""Run spool: item bytes stored once per run in Postgres and referenced from the run state.
 
-Intake writes each item's bytes here and keeps only a reference in the
-submission, so checkpoints stay small whatever the attachment size (RT-34).
-With STATE_KEY set (a Fernet key), bytes are encrypted at rest (RT-35, RT-51);
-the spool of a finished run is deleted by the retention sweep.
+Intake puts each item's bytes here and keeps only a reference (the content's
+SHA-256) in the submission, so checkpoints stay small whatever the attachment
+size (RT-34), and any worker on any host can read them back when it resumes a
+run. With STATE_KEY set (a Fernet key) the bytes are encrypted at rest
+(RT-35, RT-51). A finished run's rows are deleted by the retention sweep.
+
+    spool(run_id, ref, data bytea, created_at)    primary key (run_id, ref)
 """
 from __future__ import annotations
 
 import hashlib
-import os
-import shutil
-from pathlib import Path
+import time
+from typing import Any
+
+DDL = """
+CREATE TABLE IF NOT EXISTS spool (
+  run_id TEXT NOT NULL, ref TEXT NOT NULL, data BYTEA NOT NULL, created_at DOUBLE PRECISION NOT NULL,
+  PRIMARY KEY (run_id, ref));
+"""
 
 
 class Spool:
-    def __init__(self, folder: Path, key: str | None = None) -> None:
-        self.folder = Path(folder)
-        self.folder.mkdir(parents=True, exist_ok=True)
+    def __init__(self, pool: Any, run_id: str, key: str | None = None) -> None:
+        self.pool, self.run_id = pool, run_id
         self._fernet = None
         if key:
             from cryptography.fernet import Fernet
@@ -24,19 +31,20 @@ class Spool:
 
     def put(self, data: bytes) -> str:
         ref = hashlib.sha256(data).hexdigest()
-        path = self.folder / ref
-        if not path.exists():
-            blob = self._fernet.encrypt(data) if self._fernet else data
-            tmp = path.with_suffix(".tmp")
-            tmp.write_bytes(blob)
-            os.replace(tmp, path)
+        blob = self._fernet.encrypt(data) if self._fernet else data
+        with self.pool.connection() as conn:
+            conn.execute("INSERT INTO spool(run_id, ref, data, created_at) VALUES (%s, %s, %s, %s) "
+                         "ON CONFLICT (run_id, ref) DO NOTHING", (self.run_id, ref, blob, time.time()))
         return ref
 
     def get(self, ref: str) -> bytes:
-        if not all(c in "0123456789abcdef" for c in ref) or len(ref) != 64:
-            raise ValueError("bad spool reference")
-        blob = (self.folder / ref).read_bytes()
+        with self.pool.connection() as conn:
+            row = conn.execute("SELECT data FROM spool WHERE run_id=%s AND ref=%s", (self.run_id, ref)).fetchone()
+        if row is None:
+            raise KeyError(f"no spooled bytes {ref[:12]} for run {self.run_id}")
+        blob = bytes(row["data"])
         return self._fernet.decrypt(blob) if self._fernet else blob
 
-    def delete(self) -> None:
-        shutil.rmtree(self.folder, ignore_errors=True)
+    def delete(self) -> int:
+        with self.pool.connection() as conn:
+            return conn.execute("DELETE FROM spool WHERE run_id=%s", (self.run_id,)).rowcount
