@@ -1,0 +1,15 @@
+{
+  "client": "default",
+  "usecase": "settlements",
+  "version": "1.0.0",
+  "description": "Default extraction: settlement instructions (settlement date, currency, amount, trade date, comments, portfolio, cash purpose code, transaction type, security id).",
+  "model": {"provider": "stub", "name": "deterministic-stub", "max_tokens": 4096},
+  "skills": ["settlement-fields", "settlement-rows"],
+  "thresholds": {"accept_at": 0.8},
+  "evidence": {"rows": 200, "tail_rows": 10, "pages": 10, "tail_pages": 1, "max_sheets": 5,
+               "max_chars_per_document": 60000},
+  "intake": {"max_zip_members": 200, "max_zip_uncompressed_mb": 200, "max_compression_ratio": 100, "max_zip_depth": 1},
+  "classification": {"out_of_scope": "extract"},
+  "locale": {"date_order": null},
+  "output": {"decimal_format": "number", "formats": ["csv"]}
+}

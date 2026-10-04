@@ -14,6 +14,10 @@ from tests.samples import write_all
 
 ROOT = Path(__file__).resolve().parent.parent
 
+#: The suite's mechanics tests are written against the invoice config; the shipped
+#: default (settlements) is tested on its own in test_settlements.py.
+INVOICE_DEFAULTS = '{"client": "default", "usecase": "invoice", "version": "1.0.0"}\n'
+
 
 @pytest.fixture
 def input_root(tmp_path: Path) -> Path:
@@ -26,6 +30,7 @@ def input_root(tmp_path: Path) -> Path:
 def config_root(tmp_path: Path) -> Path:
     dst = tmp_path / "configs"
     shutil.copytree(ROOT / "configs", dst)
+    (dst / "defaults.json").write_text(INVOICE_DEFAULTS)
     return dst
 
 

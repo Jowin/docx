@@ -1,0 +1,21 @@
+{
+  "schema_version": "1.0",
+  "generated_by": "manual",
+  "types": {
+    "settlement": {
+      "keywords": [
+        {"term": "settlement", "weight": 0.35}, {"term": "settle", "weight": 0.15},
+        {"term": "value date", "weight": 0.2}, {"term": "trade date", "weight": 0.2},
+        {"term": "portfolio", "weight": 0.15}, {"term": "purpose code", "weight": 0.15},
+        {"term": "isin", "weight": 0.1}, {"term": "cusip", "weight": 0.1}
+      ],
+      "patterns": [
+        {"name": "isin", "regex": "\\b[A-Z]{2}[A-Z0-9]{9}[0-9]\\b", "weight": 0.15},
+        {"name": "transaction_type", "regex": "(?i)\\b(DVP|RVP|BUY|SELL|FX|CASH (?:IN|OUT))\\b", "weight": 0.1}
+      ],
+      "entity_weights": {"MONEY": 0.1, "DATE": 0.1},
+      "classification_threshold": 0.5,
+      "negative_signals": ["unsubscribe", "out of office"]
+    }
+  }
+}

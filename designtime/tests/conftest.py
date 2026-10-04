@@ -63,6 +63,8 @@ def db_session(db_url: str):
 
 
 RUNTIME_DIR = Path(__file__).resolve().parents[2] / "runtime"
+#: Tests are written against the invoice config; the shipped default is settlements.
+INVOICE_DEFAULTS = '{"client": "default", "usecase": "invoice", "version": "1.0.0"}\n'
 
 
 @pytest.fixture(autouse=True)
@@ -73,6 +75,7 @@ def runtime_configs(tmp_path, monkeypatch) -> Path:
 
     root = tmp_path / "runtime-configs"
     shutil.copytree(RUNTIME_DIR / "configs", root)
+    (root / "defaults.json").write_text(INVOICE_DEFAULTS)
     monkeypatch.setenv("RUNTIME_DIR", str(RUNTIME_DIR))
     monkeypatch.setenv("RUNTIME_PYTHON", sys.executable)
     monkeypatch.setenv("RUNTIME_CONFIG_ROOT", str(root))

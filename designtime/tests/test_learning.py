@@ -36,6 +36,7 @@ def learn_env(tmp_path, monkeypatch, client):
         pytest.skip("runtime source not next to designtime")
     configs = tmp_path / "configs"
     shutil.copytree(RUNTIME / "configs", configs)
+    (configs / "defaults.json").write_text('{"client": "default", "usecase": "invoice", "version": "1.0.0"}')
     data = tmp_path / "data"
     data.mkdir()
     for name, text in (("remit.csv", REMIT), ("statement.csv", STATEMENT), ("terms.csv", TERMS),

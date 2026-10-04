@@ -37,9 +37,11 @@ from typing import Any
 from extractor_tools.values import find_amounts
 
 from .evidence import Block, Doc, Table
-from .schema import DataDictionary, Field, first_date_token, normalize
+from .schema import ROW_KEY, DataDictionary, Field, first_date_token, normalize
 
 _ID_HINTS = ("number", " no", "#", " id", "reference", "ref")
+#: Whole words that make a string field an identifier (its value is one token).
+_ID_WORDS = {"number", "no", "id", "reference", "ref", "isin", "cusip", "sedol", "code"}
 _TOTAL_WORDS = re.compile(r"(?<![a-z])(sub-?total|total|tax|vat|gst|balance|amount due)(?![a-z])", re.I)
 _SYMBOL_ISO = {"$": "USD", "US$": "USD", "€": "EUR", "£": "GBP", "₹": "INR", "¥": "JPY",
                "C$": "CAD", "A$": "AUD"}
@@ -65,7 +67,7 @@ class StubModel:
     def extract(self, dictionary: DataDictionary, docs: list[Doc], **_: Any) -> dict[str, Any]:
         scalars = [f for f in dictionary.fields if f.type != "array"]
         arrays = [f for f in dictionary.fields if f.type == "array"]
-        key = dictionary.get(dictionary.record_key)
+        key = None if dictionary.record_key == ROW_KEY else dictionary.get(dictionary.record_key)
         self._field_cache = {f.name: f for f in scalars}
         labels = sorted(((a, f) for f in scalars for a in f.labels), key=lambda x: -len(x[0]))
         partials: list[_Partial] = []
@@ -74,7 +76,7 @@ class StubModel:
             if doc.status != "read":
                 continue
             maps = {id(t): self._column_map(t, labels) for t in doc.tables}
-            keyed = [t for t in doc.tables if key.name in maps[id(t)]]
+            keyed = [t for t in doc.tables if (len(maps[id(t)]) >= 2 if key is None else key.name in maps[id(t)])]
             skip = {b.locator for t in keyed for b in t.header + [x for row in t.rows for x in row]}
             cands = self._label_candidates(doc, di, labels, skip, scalars)
             for t in doc.tables:
@@ -172,9 +174,14 @@ class StubModel:
 
     def _row_records(self, doc: Doc, di: int, table: Table, colmap: dict[str, int], key: Field,
                      arrays: list[Field], doc_cands) -> list[_Partial]:
-        """One partial record per key value in a table with a key column."""
+        """One partial record per key value in a table with a key column (per row with "@row")."""
         groups: dict[str, list[list[Block]]] = {}
-        for row in table.rows:
+        for ri, row in enumerate(table.rows):
+            if key is None:                      # "@row": each data row is a record
+                mapped = [b for b in row if b.col in colmap.values() and str(b.text).strip()]
+                if len(mapped) >= 2 and not any(b.vtype == "string" and _TOTAL_WORDS.search(b.text) for b in row):
+                    groups[f"@{di}:{table.group}:{ri}"] = [row]
+                continue
             cell = next((b for b in row if b.col == colmap[key.name]), None)
             if cell is None or any(b.vtype == "string" and _TOTAL_WORDS.search(b.text) for b in row
                                    if b is not cell):
@@ -187,7 +194,7 @@ class StubModel:
 
         item_maps = {f.name: self._item_map(f, table) for f in arrays}
         out = []
-        for rows in groups.values():
+        for gkey, rows in groups.items():
             cands = {name: [] for name in doc_cands}
             for name, col in colmap.items():
                 f = self._field_cache[name]
@@ -197,13 +204,14 @@ class StubModel:
                     raw = b.value if b.value is not None else b.text
                     self._add(cands, f, raw, doc, b, 0.85 if len(distinct) == 1 else 0.6, di, b.row or 0)
             for name, lst in doc_cands.items():          # document labels fill the rest
-                if name not in colmap and name != key.name:
+                if name not in colmap and (key is None or name != key.name):
                     cands[name].extend(lst)
             items = {}
             for f in arrays:
                 mapping = item_maps[f.name]
                 items[f.name] = self._items_from_rows(doc, rows, mapping) if mapping else []
-            out.append(_Partial(order=(False, di, rows[0][0].row or 0), cands=cands, items=items))
+            out.append(_Partial(order=(False, di, rows[0][0].row or 0), cands=cands, items=items,
+                                key=gkey if key is None else None))
         return out
 
     # ---------------------------------------------------------- arrays
@@ -246,8 +254,10 @@ class StubModel:
 
     # ---------------------------------------------------------- records
 
-    def _group(self, partials: list[_Partial], key: Field) -> tuple[list[_Partial], list[str]]:
+    def _group(self, partials: list[_Partial], key: Field | None) -> tuple[list[_Partial], list[str]]:
         for p in partials:
+            if key is None:                      # "@row": rows already carry their own key
+                continue
             ranked = sorted(p.cands.get(key.name, []), key=lambda c: (-c["confidence"], c["_order"]))
             if ranked:
                 v, _ = normalize(key, ranked[0]["value"], date_order=self.date_order)
@@ -263,6 +273,15 @@ class StubModel:
         records = sorted(groups.values(), key=lambda g: g.order)
         loose = [p for p in partials if not p.key]
         notes: list[str] = []
+        if loose and key is None and len(records) > 1:
+            # "@row": a value labelled once ("Portfolio: GLB-EQ-01") fills rows that lack that field
+            for p in loose:
+                for name, lst in p.cands.items():
+                    for r in records:
+                        if lst and not r.cands.get(name):
+                            r.cands.setdefault(name, []).extend(dict(c, confidence=round(c["confidence"] - 0.05, 4))
+                                                                for c in lst)
+            loose = []
         if loose:
             if len(records) == 1:
                 for p in loose:
@@ -299,7 +318,11 @@ class StubModel:
         return {f.name: out[f.name] for f in dictionary.fields}
 
     def _currency(self, out: dict[str, Any], docs: list[Doc]) -> list[dict[str, Any]]:
-        total = out.get("total_amount") or {}
+        """The ISO code written or implied next to the record's main amount ("USD 2,000.00", "$12.00")."""
+        main = "total_amount" if "total_amount" in self._field_cache else next(
+            (f.name for f in self._field_cache.values() if f.type == "decimal" and f.critical),
+            next((f.name for f in self._field_cache.values() if f.type == "decimal"), ""))
+        total = out.get(main) or {}
         doc_id, _, loc = (total.get("source") or "").partition("#")
         for doc in docs:
             if doc.doc_id != doc_id:
@@ -386,8 +409,8 @@ def _value_from_text(f: Field, rest: str) -> Any:
     if f.type == "date":
         return first_date_token(rest)
     if f.type == "string":
-        id_like = any(h in f" {f.name.replace('_', ' ')}" for h in _ID_HINTS) or \
-            any(any(h.strip() in a for h in _ID_HINTS) for a in f.aliases)
+        words = set(f.name.split("_")) | {w for a in f.aliases for w in re.split(r"[\s_]+", a.lower())}
+        id_like = bool(words & _ID_WORDS) or any("#" in a for a in f.aliases)
         if id_like:
             return rest.split()[0].strip(".,;")
         return re.split(r"\s{2,}|;|\|", rest)[0].strip(" .,")

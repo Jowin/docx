@@ -19,7 +19,7 @@ from .config_store import ExtractionConfig
 from .errors import ModelError
 from .evidence import Doc
 from .gateway import Gateway, ModelRequest, ModelResponse, ToolSpec, call_model
-from .schema import DataDictionary
+from .schema import ROW_KEY, DataDictionary
 from .stub import StubModel
 
 TOOL_NAME = "record_extraction"
@@ -54,7 +54,7 @@ def tool_schema(dictionary: DataDictionary) -> ToolSpec:
     return ToolSpec(
         name=TOOL_NAME,
         description=("Record the extracted data. Call exactly once. Return one record per distinct "
-                     f"{dictionary.name} in the evidence, told apart by {dictionary.record_key}; "
+                     f"{dictionary.name} in the evidence, {_told_apart(dictionary)}; "
                      "a single one is a list with one record."),
         parameters={"type": "object", "properties": {"records": {"type": "array", "items": record}},
                     "required": ["records"]})
@@ -64,7 +64,13 @@ def user_prompt(dictionary: DataDictionary, evidence: str) -> str:
     return ("Data dictionary:\n```json\n" + json.dumps(dictionary.describe(), indent=1) +
             "\n```\n\nEvidence:\n" + evidence +
             f"\n\nCall {TOOL_NAME} once. Return one record per distinct {dictionary.name}, "
-            f"identified by {dictionary.record_key}, each with every field in the data dictionary.")
+            f"{_told_apart(dictionary)}, each with every field in the data dictionary.")
+
+
+def _told_apart(dictionary: DataDictionary) -> str:
+    if dictionary.record_key == ROW_KEY:
+        return "one per row or line item of the source (each row is its own record)"
+    return f"told apart by {dictionary.record_key}"
 
 
 class LLMExtractor:

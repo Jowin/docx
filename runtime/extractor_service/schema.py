@@ -18,7 +18,8 @@ A data dictionary is ``schema.json`` in a config folder:
 Field types: string, integer, decimal, date, boolean, enum (with ``values``),
 and array (of objects whose ``items`` are scalar fields).
 
-Output is always a list of records of this shape. ``record_key`` names the
+Output is always a list of records of this shape. ``record_key`` ("@row" = one
+record per table row, when no single field identifies a record) names the
 field that tells records apart (an invoice number): two sources holding the
 same key describe the same record. When omitted it defaults to the first
 required string field, else the first scalar field.
@@ -40,6 +41,10 @@ from extractor_tools.values import find_amounts, parse_date, parse_number
 from .errors import ConfigError
 
 SCALAR_TYPES = ("string", "integer", "decimal", "date", "boolean", "enum")
+#: ``"record_key": "@row"``: no field identifies a record; each row of a table that
+#: carries two or more of the dictionary's columns is one record (settlement
+#: instructions, cash breaks, trade blotters).
+ROW_KEY = "@row"
 _NAME = re.compile(r"^[a-z][a-z0-9_]{0,63}$")
 _DATE_TOKEN = re.compile(
     r"\d{4}-\d{2}-\d{2}(?:[T ]\d{2}:\d{2}(?::\d{2})?)?"
@@ -181,7 +186,9 @@ def load_dictionary(obj: Any) -> DataDictionary:
     if not scalars:
         raise ConfigError("schema_invalid", "fields need at least one scalar field to key records")
     key = obj.get("record_key")
-    if key is None:
+    if key == ROW_KEY:
+        pass                                   # every table row is its own record
+    elif key is None:
         key = next((f.name for f in scalars if f.required and f.type == "string"), scalars[0].name)
     elif key not in {f.name for f in scalars}:
         raise ConfigError("schema_invalid", f"record_key {key!r} must name a scalar field")

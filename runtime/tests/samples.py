@@ -117,6 +117,39 @@ def bundle_zip() -> bytes:
     return buf.getvalue()
 
 
+SETTLEMENT_BLOTTER = (
+    "Trade Date,Settlement Date,Portfolio,Transaction Type,Security ID,CCY,Net Amount,Purpose Code,Comments\n"
+    "2026-10-01,2026-10-03,GLB-EQ-01,BUY,US0378331005,USD,\"-1,250,000.00\",SECU,Apple purchase\n"
+    "2026-10-01,2026-10-03,GLB-EQ-01,SELL,GB0002634946,GBP,\"845,300.50\",SECU,\n"
+    "2026-10-02,2026-10-02,EM-FI-07,CASH OUT,,EUR,(12500.00),FEES,Custody fee Q3\n"
+    "Total,,,,,,,,\n")
+
+
+def settlement_blotter_csv() -> bytes:
+    return SETTLEMENT_BLOTTER.encode()
+
+
+def settlement_eml() -> bytes:
+    from email.message import EmailMessage
+    m = EmailMessage()
+    m["Subject"], m["From"], m["To"] = ("Settlement instruction - value 06 Oct", "ops@custodian.example",
+                                        "settlements@fund.example")
+    m.set_content("Hi team,\n\nPlease settle the following:\n\nPortfolio: GLB-FI-02\nTransaction Type: DVP\n"
+                  "Security ID: XS1234567890\nTrade Date: 01-Oct-2026\nSettlement Date: 06-Oct-2026\n"
+                  "Amount: USD 2,000,000.00\nCash Purpose Code: SECU\nComments: Partial delivery accepted\n\n"
+                  "Regards,\nOps\n")
+    return bytes(m)
+
+
+def settlement_blotter_eml() -> bytes:
+    from email.message import EmailMessage
+    m = EmailMessage()
+    m["Subject"], m["From"], m["To"] = "Settlements for today", "ops@custodian.example", "settlements@fund.example"
+    m.set_content("Attached today's settlement blotter.\nPortfolio: GLB-EQ-01\n")
+    m.add_attachment(settlement_blotter_csv(), maintype="text", subtype="csv", filename="blotter.csv")
+    return bytes(m)
+
+
 SAMPLES = {
     "invoice.xlsx": invoice_xlsx,
     "statement.csv": statement_csv,
@@ -126,6 +159,9 @@ SAMPLES = {
     "invoice-email.msg": invoice_msg,
     "bundle.zip": bundle_zip,
     "logo.png": logo_png,
+    "settlement-blotter.csv": settlement_blotter_csv,
+    "settlement-instruction.eml": settlement_eml,
+    "settlement-blotter.eml": settlement_blotter_eml,
 }
 
 

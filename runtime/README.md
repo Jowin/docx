@@ -273,6 +273,31 @@ START -> resolve_config -> ingest --(one Send per item)--> parse_item (parallel,
 `metadata.graph` and `metadata.timings_ms` hold the path and each node's time
 (one entry per parsed item). `GET /graph` draws it as Mermaid text.
 
+## Default use case: settlement instructions
+
+A request that names no client and use case is extracted with
+`default/settlements/1.0.0`. Each record is one settlement instruction:
+
+| Field | Type | Required | Read from labels such as |
+| --- | --- | --- | --- |
+| `settlement_date` | date | yes | Settlement Date, Settle Date, Value Date |
+| `currency` | ISO code | yes | CCY, Currency; or a symbol / code next to the amount |
+| `amount` | decimal, critical | yes | Net Amount, Settlement Amount, Amount; brackets and "DR" are negative |
+| `trade_date` | date | | Trade Date, Deal Date, TD |
+| `comments` | text | | Comments, Remarks, Notes, Narrative |
+| `portfolio` | text | yes | Portfolio, Fund, Account (code) |
+| `cash_purpose_code` | text | | Cash Purpose Code, Purpose Code, Reason Code |
+| `transaction_type` | text | | Transaction Type, Trade Type, Txn Type |
+| `security_id` | text | | Security ID, ISIN, CUSIP, SEDOL; empty for cash movements |
+
+`"record_key": "@row"` makes every row of a blotter its own record (no single
+field identifies an instruction); a value labelled once elsewhere in the email
+("Portfolio: GLB-EQ-01") fills rows that lack it. An email with labelled values
+and no table is one instruction. Its detection rules flag mail that doesn't
+look like settlements (`out_of_scope`) but still extract it. The invoice config
+(`default/invoice`) and `acme/ap-invoices` remain for invoice mail; name them
+in the request.
+
 ## Configs
 
 The config folders are the **source of truth**: what is served, and every
@@ -281,7 +306,7 @@ and records releases in `releases.json`; the runtime only reads.
 
 ```
 configs/
-  defaults.json                        {"client": "default", "usecase": "invoice", "version": "1.0.0"}
+  defaults.json                        {"client": "default", "usecase": "settlements", "version": "1.0.0"}
   lookups/                             global ingestion lookups
   <client>/lookups/                    the client's
   <client>/<usecase>/

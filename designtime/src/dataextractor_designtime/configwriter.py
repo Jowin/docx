@@ -15,7 +15,8 @@ byte the folder that is published and, once released, served::
 Operational settings (model, evidence budgets, intake limits, locale, output
 format, cost limits, classification) and the system prompt come from the
 *base*: the use case's latest version when there is one, otherwise the
-template config (``defaults.json``'s client and use case). Skills learned by
+template config (``defaults.json``'s client and use case; a template lends
+only its operational settings, not its prompt or skills). Skills learned by
 pattern learning (``kind: learned-pattern``) are carried into the new version
 as shared skills, so a redesign keeps what was learned one sample at a time.
 """
@@ -112,7 +113,9 @@ def write_version(dst: Path, *, client: str, usecase: str, schemas: dict[str, Fi
     base_manifest: dict[str, Any] = {}
     if base is not None and (base / "manifest.json").is_file():
         base_manifest = json.loads((base / "manifest.json").read_text(encoding="utf-8"))
-    prompt = base / "prompts" / "system.md" if base is not None else None
+    # a template from another use case lends its settings, not its domain prompt or skills
+    same = base is not None and (base.parent.parent.name, base.parent.name) == (client, usecase)
+    prompt = base / "prompts" / "system.md" if same else None
     (dst / "prompts" / "system.md").write_text(
         prompt.read_text(encoding="utf-8") if prompt is not None and prompt.is_file() else FALLBACK_PROMPT,
         encoding="utf-8")
@@ -122,7 +125,7 @@ def write_version(dst: Path, *, client: str, usecase: str, schemas: dict[str, Fi
     base_skill_names = list(base_manifest.get("skills") or [])
     for spec in (base_manifest.get("types") or {}).values():
         base_skill_names += [s for s in spec.get("skills", []) if s not in base_skill_names]
-    for name in base_skill_names:
+    for name in base_skill_names if same else []:
         src = base / "skills" / f"{name}.md" if base is not None else None
         if src is None or not src.is_file():
             continue
