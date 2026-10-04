@@ -67,6 +67,10 @@ class Settings:
     webhook_allowed_hosts: tuple[str, ...] = ()
     retention_days: float = 90.0
     poll_interval_s: float = 0.5
+    #: Where each finished job's result is written as files; None = write none (the CLI, tests).
+    output_root: Path | None = None
+    #: Formats written when neither the request nor the config says otherwise.
+    output_formats: tuple[str, ...] = ("csv",)
 
     @classmethod
     def from_env(cls) -> "Settings":
@@ -94,7 +98,13 @@ class Settings:
                    webhook_timeout_s=float(env("WEBHOOK_TIMEOUT_S", "15")),
                    webhook_backoff_s=float(env("WEBHOOK_BACKOFF_S", "5")),
                    webhook_allowed_hosts=hosts,
-                   retention_days=float(env("RETENTION_DAYS", "90")))
+                   retention_days=float(env("RETENTION_DAYS", "90")),
+                   output_root=Path(env("OUTPUT_ROOT", str(here / "output"))) if env("OUTPUT_ROOT", "x") else None,
+                   output_formats=_formats(env("OUTPUT_FORMATS", "csv")))
+
+
+def _formats(text: str) -> tuple[str, ...]:
+    return tuple(f.strip().lower() for f in text.split(",") if f.strip() and f.strip().lower() != "none")
 
 
 @dataclass
@@ -245,6 +255,62 @@ def _failed(settings: Settings, request: dict[str, Any], code: str, message: str
                              "elapsed_ms": round((time.time() - t0) * 1000, 1)}}
     _write_audit(settings, extended)
     return Outcome(data=[], extended=extended, flagged=True, audit_id=audit_id, flags=[f"error:{code}"])
+
+
+# ------------------------------------------------------------------ result files
+
+
+def output_formats(settings: Settings, requested: list[str] | None, cfg: Any) -> list[str]:
+    """Request, then the config's ``output.formats``, then OUTPUT_FORMATS (default csv)."""
+    from extractor_tools.writers import normalise
+    if requested is not None:
+        chosen = requested
+    elif cfg is not None and isinstance((cfg.manifest.get("output") or {}).get("formats"), list):
+        chosen = cfg.manifest["output"]["formats"]
+    else:
+        chosen = list(settings.output_formats)
+    out: list[str] = []
+    for f in chosen:
+        n = normalise(f)
+        if n not in out:
+            out.append(n)
+    return out
+
+
+def write_outputs(settings: Settings, extended: dict[str, Any], formats: list[str], name: str,
+                  request: dict[str, Any]) -> list[dict[str, Any]]:
+    """Write the result in each format under OUTPUT_ROOT; record what was written in metadata.outputs.
+
+    A file that cannot be written does not fail the job: it is listed with its
+    error and the result is flagged ``output_failed:<format>``.
+    """
+    if settings.output_root is None:
+        return []
+    from extractor_tools.writers import write
+    md = extended.setdefault("metadata", {})
+    cfg = md.get("config") or {}
+    client = cfg.get("client") or request.get("client") or "_unresolved"
+    usecase = cfg.get("usecase") or request.get("usecase") or "_unresolved"
+    day = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    folder = Path(settings.output_root) / client / usecase / day
+    written = []
+    for fmt in formats:
+        try:
+            data, media, ext = write(extended, fmt)
+            folder.mkdir(parents=True, exist_ok=True)
+            path = folder / f"{name}.{ext}"
+            tmp = path.with_name(f".{path.name}.tmp")
+            tmp.write_bytes(data)
+            tmp.replace(path)
+            written.append({"format": fmt, "path": path.relative_to(settings.output_root).as_posix(),
+                            "media_type": media, "bytes": len(data), "sha256": hashlib.sha256(data).hexdigest()})
+        except Exception as exc:                          # noqa: BLE001 - reported, never fatal
+            written.append({"format": fmt, "error": f"{type(exc).__name__}: {exc}"[:300]})
+            flag = f"output_failed:{fmt}"
+            extended["flags"] = list(extended.get("flags") or []) + [flag]
+            extended["flagged"] = True
+    md["outputs"] = written
+    return written
 
 
 def _write_audit(settings: Settings, extended: dict[str, Any]) -> None:

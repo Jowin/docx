@@ -37,7 +37,7 @@ from typing import Any
 
 from fastapi import FastAPI, Request
 from fastapi.concurrency import run_in_threadpool
-from fastapi.responses import JSONResponse, PlainTextResponse
+from fastapi.responses import JSONResponse, PlainTextResponse, Response
 
 from . import pipeline
 from .config_store import ConfigStore
@@ -60,6 +60,8 @@ EXTRACT_FIELDS: dict[str, tuple[type, str]] = {
     "callback_url": (str, "Webhook: answer 202 now and POST the result here when it is ready."),
     "async": (bool, "Answer 202 now; poll GET /extractions/{job_id} for the result."),
     "idempotency_key": (str, "Same key within the dedupe window = the same job and result."),
+    "output_formats": (list, "Files to write the result to under OUTPUT_ROOT: any of csv, xlsx, docx, pdf; "
+                             "[] writes none. Default: the config's output.formats, else OUTPUT_FORMATS (csv)."),
 }
 EXTRACT_SCHEMA: dict[str, Any] = {
     "type": "object", "required": ["file_location"], "additionalProperties": False,
@@ -96,6 +98,13 @@ def _errors(body: Any, spec: dict[str, tuple[type, str]], required: tuple[str, .
 def parse_extract_request(body: Any) -> dict[str, Any]:
     """Validate an /extract body. Raises ServiceError(422, "invalid_request") listing every problem."""
     errors = _errors(body, EXTRACT_FIELDS, ("file_location",))
+    if not errors and body.get("output_formats") is not None:
+        from extractor_tools import ToolError
+        from extractor_tools.writers import normalise
+        try:
+            body["output_formats"] = [normalise(f) for f in body["output_formats"]]
+        except (ToolError, TypeError) as exc:
+            errors.append({"loc": "output_formats", "msg": str(exc)})
     if errors:
         raise ServiceError(422, "invalid_request", "; ".join(f"{e['loc']}: {e['msg']}" for e in errors),
                            {"errors": errors})
@@ -210,7 +219,8 @@ def create_app(settings: pipeline.Settings | None = None, model_gateway: Gateway
             if code == 200 and not (req["async"] or req.get("callback_url")):
                 return JSONResponse(body["result"], status_code=200, headers=_headers(existing))
             return JSONResponse(body, status_code=code, headers=_headers(existing))
-        stored = {k: req[k] for k in ("file_location", "client", "usecase", "version", "idempotency_key")}
+        stored = {k: req[k] for k in ("file_location", "client", "usecase", "version", "idempotency_key",
+                                      "output_formats")}
         if req["async"] or req.get("callback_url"):
             job_id = jobs.create(key, stored, callback_url=req.get("callback_url"), extended=req["extended"])
             job = jobs.get(job_id)
@@ -222,8 +232,10 @@ def create_app(settings: pipeline.Settings | None = None, model_gateway: Gateway
         job = jobs.get(job_id)
         if job["status"] != "done":                     # an engine fault queued it for retry
             return JSONResponse(_job_view(jobs, job), status_code=202, headers=_headers(job))
-        return JSONResponse(pipeline.deliverable(json.loads(job["result"]), req["extended"]),
-                            headers=_headers(job))
+        full = json.loads(job["result"])
+        files = [o["path"] for o in (full.get("metadata") or {}).get("outputs") or [] if o.get("path")]
+        return JSONResponse(pipeline.deliverable(full, req["extended"]),
+                            headers={**_headers(job), **({"X-Output-Files": ",".join(files)} if files else {})})
 
     @app.get("/extractions/{job_id}")
     def get_extraction(job_id: str, extended: bool = False) -> JSONResponse:
@@ -238,6 +250,26 @@ def create_app(settings: pipeline.Settings | None = None, model_gateway: Gateway
                          limit: int = 50) -> list[dict[str, Any]]:
         return [_job_view(jobs, j, with_result=False) for j in jobs.list(status=status, client=client,
                                                                           flagged=flagged, limit=limit)]
+
+    @app.get("/extractions/{job_id}/output/{fmt}")
+    def extraction_output(job_id: str, fmt: str) -> Response:
+        """The result as a file in any writer format (csv, xlsx, docx, pdf), rendered from the stored result;
+        or the copy written at the time, when there is one and it is unchanged."""
+        from extractor_tools import ToolError
+        from extractor_tools.writers import WRITERS, normalise, write
+        job = jobs.get(job_id)
+        if job is None:
+            raise ServiceError(404, "job_not_found", f"no job {job_id}")
+        if job["status"] != "done":
+            raise ServiceError(409, "job_not_finished", f"job {job_id} is still {PUBLIC[job['status']]}")
+        try:
+            f = normalise(fmt)
+        except ToolError as exc:
+            raise ServiceError(400, "format_invalid", str(exc), {"formats": list(WRITERS)}) from exc
+        result = json.loads(job["result"])
+        data, media, ext = write(result, f)
+        return Response(data, media_type=media, headers={
+            "Content-Disposition": f'attachment; filename="{job_id}.{ext}"', **_headers(job)})
 
     @app.post("/extractions/{job_id}/redeliver", status_code=202)
     def redeliver(job_id: str) -> dict[str, Any]:

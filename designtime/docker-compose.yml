@@ -62,6 +62,7 @@ services:
     volumes:
       - ../runtime/configs:/configs:ro
       - ${LEARNING_DATA:-../runtime/data}:/data:ro
+      - ${EXTRACTION_OUTPUT:-../runtime/output}:/output     # every result as CSV (OUTPUT_FORMATS)
     ports:
       - "8001:8000"
 
@@ -83,6 +84,7 @@ services:
     volumes:
       - ../runtime/configs:/configs:ro
       - ${LEARNING_DATA:-../runtime/data}:/data:ro
+      - ${EXTRACTION_OUTPUT:-../runtime/output}:/output     # every result as CSV (OUTPUT_FORMATS)
 
   # The console for both flows: http://localhost:4173
   ui:

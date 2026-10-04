@@ -9,8 +9,9 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1
 
 # tesseract: OCR for scanned PDF pages (and images, when a config turns it on)
+# fonts-dejavu-core: the PDF writer's font (currency symbols, accents)
 RUN apt-get update \
- && apt-get install -y --no-install-recommends tesseract-ocr tesseract-ocr-eng \
+ && apt-get install -y --no-install-recommends tesseract-ocr tesseract-ocr-eng fonts-dejavu-core \
  && rm -rf /var/lib/apt/lists/*
 
 WORKDIR /app
@@ -22,8 +23,8 @@ COPY extractor_service/ extractor_service/
 COPY configs/ configs/
 
 RUN useradd --system --uid 10001 --home /app extractor \
- && mkdir -p /data /audit \
- && chown extractor /data /audit
+ && mkdir -p /data /audit /output \
+ && chown extractor /data /audit /output
 
 # Jobs, results, review, the audit chain, the spool and checkpoints live in
 # Postgres: pass DATABASE_URL (and DB_SCHEMA, default "extractor") at run time.
@@ -31,6 +32,8 @@ RUN useradd --system --uid 10001 --home /app extractor \
 ENV CONFIG_ROOT=/app/configs \
     INPUT_ROOT=/data \
     AUDIT_DIR=/audit \
+    OUTPUT_ROOT=/output \
+    OUTPUT_FORMATS=csv \
     DB_SCHEMA=extractor \
     WORKERS=2 \
     PARSE_SANDBOX=process \

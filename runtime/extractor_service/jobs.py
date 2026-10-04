@@ -537,12 +537,28 @@ class Runner:
                                            {"attempts": job["attempts"]}, time.time())
                 outcome.flags.append("dead_lettered")
                 outcome.extended["flags"].append("dead_lettered")
+                self._files(outcome, req, job["id"])
                 self.store.finish(job["id"], outcome, dead=True)
             else:
                 self.store.retry_later(job["id"], f"{type(exc).__name__}: {exc}",
                                        delay_s=min(self.settings.job_retry_backoff_s * 2 ** (job["attempts"] - 1), 60))
             return
+        self._files(outcome, req, job["id"])
         self.store.finish(job["id"], outcome)
+
+    def _files(self, outcome: Any, req: dict[str, Any], job_id: str) -> None:
+        """Write the result as files (CSV by default) before the job is finished, so the
+        stored result, the webhook and the poll all list them in ``metadata.outputs``."""
+        try:
+            formats = pipeline.output_formats(self.settings, req.get("output_formats"), outcome.cfg)
+        except Exception as exc:                               # noqa: BLE001 - a bad config value
+            formats = []
+            outcome.extended.setdefault("metadata", {})["outputs"] = [{"error": str(exc)[:300]}]
+            outcome.extended["flags"] = list(outcome.extended.get("flags") or []) + ["output_failed:config"]
+            outcome.extended["flagged"] = True
+        pipeline.write_outputs(self.settings, outcome.extended, formats, job_id, req)
+        outcome.flags = list(outcome.extended.get("flags") or [])
+        outcome.flagged = bool(outcome.extended.get("flagged"))
 
     # -------------------------------------------------------------- delivery
 

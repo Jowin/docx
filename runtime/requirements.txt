@@ -25,3 +25,5 @@ psycopg-pool==3.3.3
 msoffcrypto-tool==6.0.0     # opens password-protected Office files (MIT)
 pypdfium2==5.7.1          # renders scanned PDF pages for OCR (also used by pdfplumber)
 pillow==12.2.0            # image handling for OCR
+reportlab==4.4.10        # PDF Writer tool (BSD)
+python-docx==1.2.0        # Word Writer tool (MIT)

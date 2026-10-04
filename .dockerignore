@@ -8,3 +8,4 @@ runtime/data
 runtime/audit
 designtime/tests
 *.zip
+runtime/output

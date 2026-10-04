@@ -62,6 +62,12 @@ def envelope(tool: str, data: bytes, filename: str | None,
     }
 
 
+def envelope_out(tool: str, data: bytes, media_type: str, params: dict[str, Any]) -> dict[str, Any]:
+    """A writer tool's answer: the file's identity and how it was made (the bytes travel separately)."""
+    return {"tool": tool, "tool_version": TOOL_VERSION, "params": params,
+            "output": {"media_type": media_type, "bytes": len(data), "sha256": hashlib.sha256(data).hexdigest()}}
+
+
 def check_size(data: bytes, max_bytes: int) -> None:
     if not data:
         raise ToolError(FILE_CORRUPT, "empty input")

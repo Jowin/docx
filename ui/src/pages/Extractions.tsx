@@ -135,7 +135,18 @@ function JobDetail({ jobId }: { jobId: string }) {
             ["Confidence", res.confidence != null ? res.confidence : "—"],
             ["Skills applied", (meta.skills_applied ?? []).join(", ") || "—"],
             ["Audit id", <span className="mono">{d.audit_id}</span>],
+            ["Files written", (meta.outputs ?? []).length
+              ? <span className="mono small">{meta.outputs.map((o: any) => o.path ?? `${o.format}: ${o.error}`).join(", ")}</span>
+              : <span className="muted">none</span>],
           ]} />
+        ) : null}
+        {res ? (
+          <div className="row" style={{ marginTop: 10 }}>
+            <span className="muted small">Download</span>
+            {["csv", "xlsx", "docx", "pdf"].map((f) => (
+              <a key={f} className="btn small" href={`/api/runtime/extractions/${d.job_id}/output/${f}`} download>{f.toUpperCase()}</a>
+            ))}
+          </div>
         ) : null}
       </div>
       {res ? (

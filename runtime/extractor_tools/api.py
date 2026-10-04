@@ -7,15 +7,17 @@ Tool errors return 422 with {"error", "permanent", "message", "detail"}.
 """
 from __future__ import annotations
 
+import hashlib
 from typing import Callable, Literal
 
-from fastapi import APIRouter, FastAPI, File, Form, UploadFile
-from fastapi.responses import JSONResponse
+from fastapi import APIRouter, FastAPI, File, Form, Request, UploadFile
+from fastapi.responses import JSONResponse, Response
 
 from .common import ToolError
 from .csv_reader import read_csv
 from .pdf_text import extract_pdf_text
 from .spreadsheet_reader import list_sheets, read_sheet
+from .writers import write
 
 router = APIRouter(prefix="/tools", tags=["tools"])
 
@@ -72,6 +74,60 @@ async def pdf_text(file: UploadFile = File(...), start_page: int = Form(1),
     return await _run(file, extract_pdf_text, start_page=start_page, page_limit=page_limit,
                       tail_pages=tail_pages, include_tables=include_tables,
                       table_strategy=table_strategy, include_amounts=include_amounts)
+
+
+# ------------------------------------------------------------------ writers
+
+_WRITER_PARAMS = {"csv": {"explode", "include_meta", "delimiter", "bom"}, "xlsx": set(),
+                  "docx": {"title"}, "pdf": {"title"}}
+
+
+async def _write(request: Request, fmt: str) -> Response:
+    """Body: {"result": <a result, plain or extended>, "params": {...}} -> the file."""
+    try:
+        body = await request.json()
+    except ValueError:
+        return JSONResponse(ToolError("param_invalid", "body must be JSON").to_dict(), status_code=422)
+    if not isinstance(body, dict) or "result" not in body:
+        return JSONResponse(ToolError("param_invalid", 'body must be {"result": ..., "params": {...}}').to_dict(),
+                            status_code=422)
+    params = body.get("params") or {}
+    unknown = set(params) - _WRITER_PARAMS[fmt]
+    if unknown:
+        return JSONResponse(ToolError("param_invalid", f"unknown params: {', '.join(sorted(unknown))}").to_dict(),
+                            status_code=422)
+    try:
+        data, media, ext = write(body["result"], fmt, **params)
+    except ToolError as exc:
+        return JSONResponse(exc.to_dict(), status_code=422)
+    name = str(body.get("filename") or "extraction")
+    return Response(data, media_type=media,
+                    headers={"Content-Disposition": f'attachment; filename="{name}.{ext}"',
+                             "X-Output-SHA256": hashlib.sha256(data).hexdigest()})
+
+
+@router.post("/csv-writer")
+async def csv_writer(request: Request) -> Response:
+    """An extraction result as CSV (exploded by line items when there is one array field)."""
+    return await _write(request, "csv")
+
+
+@router.post("/excel-writer")
+async def excel_writer(request: Request) -> Response:
+    """An extraction result as an .xlsx workbook: Records, one sheet per array, Sources, Run."""
+    return await _write(request, "xlsx")
+
+
+@router.post("/docx-writer")
+async def docx_writer(request: Request) -> Response:
+    """An extraction result as a Word report."""
+    return await _write(request, "docx")
+
+
+@router.post("/pdf-writer")
+async def pdf_writer(request: Request) -> Response:
+    """An extraction result as a PDF report."""
+    return await _write(request, "pdf")
 
 
 app = FastAPI(title="DataExtractor tools")

@@ -357,7 +357,7 @@ per-type `scores`, `status`):
 | `intake` | `max_zip_members` (200), `max_zip_uncompressed_mb` (200), `max_compression_ratio` (100), `max_zip_depth` (1), `max_email_depth` (3), `ocr_images` (false) |
 | `limits` | `run_ceiling_s` (300, RT-60), `max_cost_usd` (none, RT-62) |
 | `concurrency` | `max_parallel` (4, RT-41) |
-| `output` | `decimal_format`: `number` or `string` |
+| `output` | `decimal_format`: `number` or `string`; `formats`: result files to write (default from `OUTPUT_FORMATS`) |
 | `locale` | `date_order`: `DMY`, `MDY` or `YMD` |
 
 ### Skills, hints and fingerprints
@@ -445,6 +445,37 @@ The gateway handles four things:
 A record's confidence is the lowest among its required fields. Below
 `thresholds.accept_at` it is flagged `low_confidence`.
 
+## Result files: CSV by default
+
+Every finished job (clean, flagged or failed) is also written as files under
+`OUTPUT_ROOT`, **CSV by default**:
+
+```
+<OUTPUT_ROOT>/<client>/<usecase>/<YYYY-MM-DD>/<job_id>.csv    (.xlsx, .docx, .pdf when asked)
+```
+
+The formats come from the request's `output_formats` (`["csv", "xlsx", "docx", "pdf"]`, `[]` for none),
+else the config's `output.formats`, else `OUTPUT_FORMATS` (`csv`). What was written is listed in the
+result under `metadata.outputs` (path relative to `OUTPUT_ROOT`, bytes, SHA-256), so the webhook and
+the poll say where the files are; a synchronous answer also carries `X-Output-Files`. A file that
+cannot be written never fails the job: it is listed with its error and the result is flagged
+`output_failed:<format>`. `GET /extractions/{job_id}/output/{csv|xlsx|docx|pdf}` renders any format
+from the stored result on demand. Batch runs from the command line write no files. The retention
+sweep does not delete result files; age them out with the storage's own lifecycle rules.
+
+The files come from the writer tools in `extractor_tools` (pure functions, also served on their own
+at `POST /tools/{csv,excel,docx,pdf}-writer` with `{"result": ..., "params": {...}}`):
+
+| Tool | Gives |
+| --- | --- |
+| `write_csv` | one row per record; with exactly one array field (line items) one row per item, the record's fields repeated and the item's columns as `line_items.<col>`; `_confidence`, `_flagged`, `_flags` for an extended result. UTF-8 with BOM. Params: `explode`, `include_meta`, `delimiter`, `bom` |
+| `write_xlsx` | sheets `Records` (typed cells, flagged rows shaded), one per array field, `Sources` (value, confidence, locator), `Run` |
+| `write_docx` | a Word report: run summary, each record's field table with confidence and source, its line items, flags highlighted. Param: `title` |
+| `write_pdf` | the same report as PDF (DejaVu Sans, so ₹ € £ print). Param: `title` |
+
+Text a spreadsheet would run as a formula (`=…`, `+…`, `@…`) is written with a leading `'`. Every
+writer is deterministic: the same result gives the same bytes.
+
 ## Review, audit and metrics
 
 - **Review queue (RT-44..48).** Every flagged result opens an entry (`GET /review`). `POST /review/{job_id}/resolve` takes `{"reviewer", "corrections": [{"record", "field", "value"}]}`, or `"records"` to replace them, or `"action": "reject"`. Each change is logged with the original and corrected value, who made it, and when. The corrected result keeps the `audit_id`, is marked `human_corrected` and is delivered again. `GET /review/corrections/export` returns corrected results as ground truth for design-time learning (`POST /learning/corrections`).
@@ -479,6 +510,8 @@ isolation when it learns a pattern.
 | `PARSE_SANDBOX` | `process` | `off` parses in-process (no fork on the platform, debugging) |
 | `SANDBOX_MEMORY_MB` | `1024` | Address space a parse may add |
 | `RETENTION_DAYS` | `90` | Finished results kept this long |
+| `OUTPUT_ROOT` | `./output` (`/output` in the image) | Where result files are written; empty = none |
+| `OUTPUT_FORMATS` | `csv` | Default formats, comma-separated: `csv`, `xlsx`, `docx`, `pdf`; `none` = none |
 | `MAX_FILE_MB` | `25` | Largest input file |
 | `MODEL_PROVIDER` | unset | Force a provider for every config, e.g. `stub` |
 | `MODEL_GATEWAY_URL`, `MODEL_GATEWAY_TOKEN` | unset | The model gateway and its credential |
