@@ -86,7 +86,8 @@ def display(cell: dict[str, Any]) -> str:
 # ------------------------------------------------------------------ readers
 
 def _csv_doc(doc: Doc, item: Item, ev: dict[str, Any]) -> None:
-    r = read_csv(item.data, item.name, row_limit=int(ev["rows"]), tail_rows=int(ev["tail_rows"]))["result"]
+    r = read_csv(item.data, item.name, row_limit=int(ev["rows"]), tail_rows=int(ev["tail_rows"]),
+                 max_bytes=_max_bytes(ev))["result"]
     header_row = r["header_row"]
     header = []
     if header_row:
@@ -116,8 +117,13 @@ def _col_of(ref: str) -> int:
     return col_index(letters)
 
 
+def _max_bytes(ev: dict[str, Any]) -> int:
+    """The readers' per-attachment byte guard, from the config (evidence.max_attachment_mb, default 25)."""
+    return int(float(ev.get("max_attachment_mb", 25)) * 1024 * 1024)
+
+
 def _excel_doc(doc: Doc, item: Item, ev: dict[str, Any]) -> None:
-    inv = list_sheets(item.data, item.name)["result"]
+    inv = list_sheets(item.data, item.name, max_bytes=_max_bytes(ev))["result"]
     sheets = [s for s in inv["sheets"] if s["kind"] == "worksheet" and s["state"] == "visible"
               and s.get("non_empty_cells")][: int(ev["max_sheets"])]
     skipped = [s["name"] for s in inv["sheets"] if s["kind"] == "worksheet" and s["state"] != "visible"]
@@ -126,7 +132,8 @@ def _excel_doc(doc: Doc, item: Item, ev: dict[str, Any]) -> None:
     for s in sheets:
         name = s["name"]
         r = read_sheet(item.data, item.name, sheet=name, view="cells",
-                       row_limit=int(ev["rows"]), tail_rows=int(ev["tail_rows"]))["result"]
+                       row_limit=int(ev["rows"]), tail_rows=int(ev["tail_rows"]),
+                       max_bytes=_max_bytes(ev))["result"]
         grid: list[list[Block]] = []
         for row in r["rows"] + r["tail"]:
             blocks = [Block(f"{name}!{c['ref']}", display(c), c.get("value"), c["type"],
@@ -162,7 +169,7 @@ def _sheet_tables(group: str, grid: list[list[Block]]) -> list[Table]:
 
 
 def _pdf_doc(doc: Doc, data: bytes, item: Item, ev: dict[str, Any]) -> None:
-    r = extract_pdf_text(data, item.name, page_limit=int(ev["pages"]),
+    r = extract_pdf_text(data, item.name, max_bytes=_max_bytes(ev), page_limit=int(ev["pages"]),
                          tail_pages=int(ev["tail_pages"]))["result"]
     for page in r["pages"] + r["tail"]:
         if page.get("error"):

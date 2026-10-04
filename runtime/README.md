@@ -353,7 +353,7 @@ per-type `scores`, `status`):
 | --- | --- |
 | `thresholds` | `accept_at` (0.8); per type under `types.<t>.thresholds` |
 | `classification` | `out_of_scope` (`skip` or `extract`), `ambiguity_margin` (0.1) |
-| `evidence` | `rows` (200), `tail_rows` (10), `pages` (10), `tail_pages` (1), `max_sheets` (5), `max_chars_per_document` (60000), `ocr` (true), `ocr_timeout_s` (60), `parse_timeout_s` (120) |
+| `evidence` | `rows` (200), `tail_rows` (10), `pages` (10), `tail_pages` (1), `max_sheets` (5), `max_chars_per_document` (60000), `ocr` (true), `ocr_timeout_s` (60), `parse_timeout_s` (120), `max_attachment_mb` (25: the readers' per-attachment guard) |
 | `intake` | `max_zip_members` (200), `max_zip_uncompressed_mb` (200), `max_compression_ratio` (100), `max_zip_depth` (1), `max_email_depth` (3), `ocr_images` (false) |
 | `limits` | `run_ceiling_s` (300, RT-60), `max_cost_usd` (none, RT-62) |
 | `concurrency` | `max_parallel` (4, RT-41) |

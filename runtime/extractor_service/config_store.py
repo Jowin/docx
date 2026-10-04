@@ -106,7 +106,8 @@ DETECTION_FILE = "rules/detection.json"
 
 DEFAULT_EVIDENCE = {"rows": 200, "tail_rows": 10, "pages": 10, "tail_pages": 1,
                     "max_sheets": 5, "max_chars_per_document": 60_000,
-                    "ocr": True, "ocr_timeout_s": 60, "parse_timeout_s": 120}
+                    "ocr": True, "ocr_timeout_s": 60, "parse_timeout_s": 120,
+                    "max_attachment_mb": 25}
 DEFAULT_INTAKE = {"max_zip_members": 200, "max_zip_uncompressed_mb": 200,
                   "max_compression_ratio": 100, "max_zip_depth": 1,
                   "max_email_depth": 3, "ocr_images": False}
