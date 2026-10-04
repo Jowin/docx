@@ -42,6 +42,7 @@ from .schema import ROW_KEY, DataDictionary, Field, first_date_token, normalize
 _ID_HINTS = ("number", " no", "#", " id", "reference", "ref")
 #: Whole words that make a string field an identifier (its value is one token).
 _ID_WORDS = {"number", "no", "id", "reference", "ref", "isin", "cusip", "sedol", "code"}
+_TOTAL_ROW = re.compile(r"^\s*(sub-?\s?total|grand\s+total|totals?)\b", re.I)
 _TOTAL_WORDS = re.compile(r"(?<![a-z])(sub-?total|total|tax|vat|gst|balance|amount due)(?![a-z])", re.I)
 _SYMBOL_ISO = {"$": "USD", "US$": "USD", "€": "EUR", "£": "GBP", "₹": "INR", "¥": "JPY",
                "C$": "CAD", "A$": "AUD"}
@@ -179,7 +180,8 @@ class StubModel:
         for ri, row in enumerate(table.rows):
             if key is None:                      # "@row": each data row is a record
                 mapped = [b for b in row if b.col in colmap.values() and str(b.text).strip()]
-                if len(mapped) >= 2 and not any(b.vtype == "string" and _TOTAL_WORDS.search(b.text) for b in row):
+                texts = [b.text for b in row if b.vtype == "string"]
+                if len(mapped) >= 2 and not (texts and _TOTAL_ROW.match(texts[0])):
                     groups[f"@{di}:{table.group}:{ri}"] = [row]
                 continue
             cell = next((b for b in row if b.col == colmap[key.name]), None)

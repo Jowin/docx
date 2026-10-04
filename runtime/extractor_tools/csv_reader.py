@@ -226,3 +226,29 @@ def read_csv(data: bytes, filename: str | None = None, *, header_row: int = 1,
         "tail": tail_out,
     }
     return envelope(TOOL, data, filename, params, result)
+
+
+def stream_csv_rows(data: bytes, *, header_row: int = 1, delimiter: str | None = None,
+                    decimal_separators: dict[int, str] | None = None,
+                    date_orders: dict[int, str | None] | None = None,
+                    max_bytes: int = DEFAULT_MAX_BYTES) -> Iterator[dict[str, Any]]:
+    """Every data row after the header, typed like ``read_csv``'s cells, one at a time.
+
+    For reading a whole file after ``read_csv`` has profiled it: pass the
+    delimiter and the per-column decimal separator and date order it reported
+    (1-based column index), and each row comes back as ``{"row", "cells"}`` with
+    the same refs and types, without holding the file's rows in memory.
+    """
+    check_size(data, max_bytes)
+    text, _ = _decode(data)
+    dialect = _dialect(text, delimiter)
+    decs, dates = decimal_separators or {}, date_orders or {}
+    for n, rec in _records(text, dialect):
+        if (header_row and n <= header_row) or _blank(rec):
+            continue
+        cells = []
+        for c, raw in enumerate(rec):
+            if raw.strip():
+                typed = type_text(raw, decimal_sep=decs.get(c + 1, "."), date_order=dates.get(c + 1))
+                cells.append({"ref": a1(n, c + 1), "raw": raw, **typed})
+        yield {"row": n, "cells": cells}

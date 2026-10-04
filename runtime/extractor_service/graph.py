@@ -2,7 +2,7 @@
 
     START -> resolve_config -> ingest --(one Send per item)--> parse_item (parallel, sandboxed)
                                      \\-(no items)-----------\\
-          -> assemble -> classify -> (readable and in scope?) extract -> verify -> route -> END
+          -> assemble -> classify -> (readable and in scope?) extract -> expand -> verify -> route -> END
                                     \\------------------------------------^
 
 * ``ingest`` opens the input, applies the ingestion filter, unpacks emails
@@ -17,7 +17,11 @@
   out-of-scope email skips extraction and is flagged ``out_of_scope``.
 * ``extract`` asks the stub or the model; a model failure, the run ceiling
   (RT-60) or the cost ceiling (RT-62) become flags, never an exception.
-* ``verify`` grounds every value; ``route`` turns reasons into flags.
+* ``expand`` (expand.py) reads every remaining row of a large blotter when the
+  dictionary's records are rows: the extractor's citations give the column
+  mapping, code streams the file.
+* ``verify`` grounds every value and flags content no step read in full
+  (``content_truncated``); ``route`` turns reasons into flags.
 
 Nodes record their duration and the path the run took (``metadata.graph``).
 With a checkpointer, every node boundary is a checkpoint, so a run interrupted
@@ -34,6 +38,7 @@ from langgraph.graph import END, START, StateGraph
 from langgraph.types import Send
 
 from . import classify as classify_mod
+from . import expand as expand_mod
 from . import gateway as gateway_mod
 from . import sandbox, scope
 from .config_store import ConfigStore, ExtractionConfig
@@ -70,6 +75,8 @@ class RunState(TypedDict, total=False):
     docs: list[Doc]
     skills_applied: list[str]
     classification: dict[str, Any]
+    expanded: list[dict[str, Any]]       # records read straight from the file by expand
+    expand_report: list[dict[str, Any]]
     reasons: list[str]
     raw: dict[str, Any]
     model_call: dict[str, Any]
@@ -215,6 +222,20 @@ def build_graph(store: ConfigStore, settings: Any, gateway: Gateway | None = Non
             cost["model_usd"] = r.cost_usd
         return {"raw": raw, "model_call": call, "cost": cost}
 
+    def expand(state: RunState) -> dict[str, Any]:
+        cfg = state["cfg"]
+        raw_records = (state.get("raw") or {}).get("records") or []
+        if state.get("model_error") or not raw_records:
+            return {}
+        started = float(state.get("started") or time.time())
+        out = expand_mod.expand(cfg, [d for d in state["docs"] if d.status == "read"], state["sub"].items,
+                                raw_records, spool=_spool(state.get("spool_run")),
+                                deadline=started + float(cfg.limits["run_ceiling_s"]))
+        if not out["reports"]:
+            return {}
+        return {"expanded": out["records"], "expand_report": out["reports"],
+                "reasons": list(state["reasons"]) + out["reasons"]}
+
     def verify(state: RunState) -> dict[str, Any]:
         cfg, docs = state["cfg"], {d.doc_id: d for d in state["docs"]}
         readable = any(d.status == "read" for d in state["docs"])
@@ -228,7 +249,14 @@ def build_graph(store: ConfigStore, settings: Any, gateway: Gateway | None = Non
         for r in raw_records:
             fields, reasons = finalize(cfg, r, docs)
             records.append({"fields": fields, "reasons": dedupe(reasons)})
+        records = _with_expanded(records, state.get("expanded") or [])
         run_reasons = list(state["reasons"])
+        complete = {(r["document"]) for r in state.get("expand_report") or [] if r.get("complete")}
+        for d in state["docs"]:
+            cut = [n for n in d.notes if n.split(":")[0] in ("rows_truncated", "pages_truncated", "sheets_truncated")]
+            if d.status == "read" and cut and not (d.source in complete
+                                                   and all(n.startswith("rows_truncated") for n in cut)):
+                run_reasons.append(f"content_truncated:{d.name}")
         if not readable and not state["sub"].ignored:
             run_reasons.append("no_readable_content")
         if failed_model:
@@ -257,8 +285,8 @@ def build_graph(store: ConfigStore, settings: Any, gateway: Gateway | None = Non
 
     g = StateGraph(RunState)
     for name, fn in (("resolve_config", resolve_config), ("ingest", ingest), ("parse_item", parse_item),
-                     ("assemble", assemble), ("classify", classify), ("extract", extract), ("verify", verify),
-                     ("route", route)):
+                     ("assemble", assemble), ("classify", classify), ("extract", extract), ("expand", expand),
+                     ("verify", verify), ("route", route)):
         g.add_node(name, _timed(name, fn))
     g.add_edge(START, "resolve_config")
     g.add_edge("resolve_config", "ingest")
@@ -266,7 +294,40 @@ def build_graph(store: ConfigStore, settings: Any, gateway: Gateway | None = Non
     g.add_edge("parse_item", "assemble")
     g.add_edge("assemble", "classify")
     g.add_conditional_edges("classify", has_readable, {"extract": "extract", "verify": "verify"})
-    g.add_edge("extract", "verify")
+    g.add_edge("extract", "expand")
+    g.add_edge("expand", "verify")
     g.add_edge("verify", "route")
     g.add_edge("route", END)
     return g.compile(checkpointer=checkpointer)
+
+
+def _with_expanded(records: list[dict[str, Any]], expanded: list[dict[str, Any]]) -> list[dict[str, Any]]:
+    """Put rows read by expand in file order among the extracted ones from the same document."""
+    if not expanded:
+        return records
+
+    def pos(rec: dict[str, Any]) -> tuple[str, int] | None:
+        for v in rec["fields"].values():
+            doc_id, _, loc = str((v or {}).get("source") or "").partition("#")
+            m = expand_mod._parse_loc(loc)
+            if doc_id and m:
+                return doc_id, m[1]
+        return None
+
+    extra = [{"fields": e["fields"], "reasons": dedupe(e["reasons"]), "_pos": (e["_doc"], e["_row"])}
+             for e in expanded]
+    docs_expanded = {e["_pos"][0] for e in extra}
+    out: list[dict[str, Any]] = []
+    placed = False
+    for rec in records:
+        p = pos(rec)
+        if p and p[0] in docs_expanded and not placed:
+            block = [dict(r, _pos=pos(r)) for r in records if (pos(r) or ("", 0))[0] in docs_expanded] + extra
+            block.sort(key=lambda r: r["_pos"])
+            out.extend({k: v for k, v in r.items() if k != "_pos"} for r in block)
+            placed = True
+        elif not (p and p[0] in docs_expanded):
+            out.append(rec)
+    if not placed:
+        out.extend({k: v for k, v in r.items() if k != "_pos"} for r in extra)
+    return out

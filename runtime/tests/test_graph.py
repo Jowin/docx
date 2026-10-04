@@ -10,7 +10,7 @@ FULL = ["resolve_config", "ingest", "parse_item", "assemble", "extract", "verify
 def test_normal_run_visits_every_node(client):
     m = client.post("/extract", json={"file_location": "invoice.pdf", "extended": True}).json()["metadata"]
     assert m["graph"]["path"] == ["resolve_config", "ingest", "parse_item:invoice.pdf", "assemble", "classify",
-                                  "extract", "verify", "route"]
+                                  "extract", "expand", "verify", "route"]
     assert set(m["timings_ms"]) == set(m["graph"]["path"])
 
 

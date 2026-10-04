@@ -705,6 +705,27 @@ def read_sheet(data: bytes, filename: str | None = None, *, sheet: str,
     return envelope(TOOL + ".read_sheet", data, filename, params, result)
 
 
+def stream_sheet_rows(data: bytes, *, sheet: str, start_row: int = 1,
+                      max_bytes: int = DEFAULT_MAX_BYTES) -> Iterator[dict[str, Any]]:
+    """Every non-empty row of a sheet from ``start_row`` on, typed like ``read_sheet``'s cells.
+
+    For reading a whole sheet once ``read_sheet`` has sampled it; rows stream from
+    the workbook in read-only mode, so memory stays bounded by one row.
+    """
+    kind, book = _open(data, max_bytes)
+    try:
+        name, skind, _ = _resolve_sheet(book, sheet)
+        if skind != "worksheet":
+            raise ToolError(SHEET_NOT_FOUND, f"{sheet!r} is a {skind} sheet with no cells")
+        ex = book.extras(name)
+        merged_tl = {m.split(":")[0]: m for m in ex.merged}
+        if ex.max_row:
+            for r, cells in book.rows(name, max(start_row, 1), None, 1, max(ex.max_col, 1)):
+                yield {"row": r, "cells": [_cell_out(r, c, t, f, ex, merged_tl) for c, t, f in cells]}
+    finally:
+        book.close()
+
+
 def _display(cell: dict[str, Any]) -> str:
     t, v = cell["type"], cell.get("value")
     if t == "formula_uncached":

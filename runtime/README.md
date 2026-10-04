@@ -256,7 +256,7 @@ the run (RT-35, RT-51).
 ```
 START -> resolve_config -> ingest --(one Send per item)--> parse_item (parallel, sandboxed)
                                  \--(no items)----------------\
-      -> assemble -> classify -> (readable and in scope?) extract -> verify -> route -> END
+      -> assemble -> classify -> (readable and in scope?) extract -> expand -> verify -> route -> END
 ```
 
 | Node | Does |
@@ -267,7 +267,8 @@ START -> resolve_config -> ingest --(one Send per item)--> parse_item (parallel,
 | `assemble` | The single join (RT-09): numbers documents |
 | `classify` | Runs the config's detection rules (`rules/detection.json`) to pick the email type; narrows the config to that type's dictionary, skills and threshold; picks the skills whose fingerprint matches. Out of scope skips extraction |
 | `extract` | The stub or the model through the gateway; run and cost ceilings; a model failure becomes a flag |
-| `verify` | Grounds every value in the evidence, validates types, scores confidence |
+| `expand` | Row-per-record dictionaries: reads every table row the extractor did not answer for, using the columns its answer cited |
+| `verify` | Grounds every value in the evidence, validates types, scores confidence; flags `content_truncated` |
 | `route` | Flags per record and for the run, in rule order, all of them (RT-43) |
 
 `metadata.graph` and `metadata.timings_ms` hold the path and each node's time
@@ -289,6 +290,20 @@ A request that names no client and use case is extracted with
 | `cash_purpose_code` | text | | Cash Purpose Code, Purpose Code, Reason Code |
 | `transaction_type` | text | | Transaction Type, Trade Type, Txn Type |
 | `security_id` | text | | Security ID, ISIN, CUSIP, SEDOL; empty for cash movements |
+
+**Whole files, not slices.** The extractor (model or stub) only ever sees a
+slice of each table: the first `evidence.rows` (200) and last `evidence.tail_rows`
+(10). For a row-per-record dictionary the `expand` step then reads the rest:
+the column each field was cited from in the extractor's answer is that field's
+column (a header equal to one of the field's labels if nothing was cited), and
+code streams every remaining row of the CSV or sheet through the same reader
+tools, building and validating one record per row. One model call covers a
+blotter of any length; a 5,000-row CSV takes under 2 s. `metadata.expanded`
+shows the mapping, the constants and the row counts. `limits.max_records`
+(default 25,000) caps the records per run (`records_truncated:<n>` beyond it).
+In any use case, content that no step read in full (rows, pages or sheets past
+the evidence limits) is flagged `content_truncated:<file>`, so a cut is never
+silent.
 
 `"record_key": "@row"` makes every row of a blotter its own record (no single
 field identifies an instruction); a value labelled once elsewhere in the email
@@ -380,7 +395,7 @@ per-type `scores`, `status`):
 | `classification` | `out_of_scope` (`skip` or `extract`), `ambiguity_margin` (0.1) |
 | `evidence` | `rows` (200), `tail_rows` (10), `pages` (10), `tail_pages` (1), `max_sheets` (5), `max_chars_per_document` (60000), `ocr` (true), `ocr_timeout_s` (60), `parse_timeout_s` (120), `max_attachment_mb` (25: the readers' per-attachment guard) |
 | `intake` | `max_zip_members` (200), `max_zip_uncompressed_mb` (200), `max_compression_ratio` (100), `max_zip_depth` (1), `max_email_depth` (3), `ocr_images` (false) |
-| `limits` | `run_ceiling_s` (300, RT-60), `max_cost_usd` (none, RT-62) |
+| `limits` | `run_ceiling_s` (300, RT-60), `max_cost_usd` (none, RT-62), `max_records` (25,000) |
 | `concurrency` | `max_parallel` (4, RT-41) |
 | `output` | `decimal_format`: `number` or `string`; `formats`: result files to write (default from `OUTPUT_FORMATS`) |
 | `locale` | `date_order`: `DMY`, `MDY` or `YMD` |

@@ -50,6 +50,9 @@ class Table:
     group: str
     header: list[Block]
     rows: list[list[Block]]
+    #: How to read the rest of the table from the file (expand.py): "csv" with its
+    #: delimiter, header row and per-column number/date conventions, or "sheet".
+    meta: dict[str, Any] = field(default_factory=dict)
 
 
 @dataclass
@@ -106,7 +109,11 @@ def _csv_doc(doc: Doc, item: Item, ev: dict[str, Any]) -> None:
         doc.blocks.extend(blocks)
         rows.append(blocks)
     if header:
-        doc.tables.append(Table("csv", header, rows))
+        doc.tables.append(Table("csv", header, rows, meta={
+            "kind": "csv", "header_row": header_row, "delimiter": r["delimiter"],
+            "decimal_separators": {str(c["index"]): c["decimal_separator"] for c in r["columns"]},
+            "date_orders": {str(c["index"]): c["date_order"] for c in r["columns"]},
+            "data_rows": r["data_row_count"]}))
     if r["page"]["has_more"]:
         doc.notes.append(f"rows_truncated:{r['data_row_count']}")
 
@@ -127,6 +134,10 @@ def _excel_doc(doc: Doc, item: Item, ev: dict[str, Any]) -> None:
     sheets = [s for s in inv["sheets"] if s["kind"] == "worksheet" and s["state"] == "visible"
               and s.get("non_empty_cells")][: int(ev["max_sheets"])]
     skipped = [s["name"] for s in inv["sheets"] if s["kind"] == "worksheet" and s["state"] != "visible"]
+    readable = [s for s in inv["sheets"] if s["kind"] == "worksheet" and s["state"] == "visible"
+                and s.get("non_empty_cells")]
+    if len(readable) > len(sheets):
+        doc.notes.append("sheets_truncated:" + ",".join(s["name"] for s in readable[len(sheets):]))
     if skipped:
         doc.notes.append("hidden_sheets_skipped:" + ",".join(skipped))
     for s in sheets:
@@ -147,7 +158,11 @@ def _excel_doc(doc: Doc, item: Item, ev: dict[str, Any]) -> None:
             doc.blocks.append(Block(f"{name}!textbox:{tb['anchor']}", tb["text"], group=f"{name}:textbox"))
         for cm in out.get("comments", []):
             doc.blocks.append(Block(f"{name}!{cm['ref']}:comment", cm["text"], group=f"{name}:comment"))
-        doc.tables.extend(_sheet_tables(name, grid))
+        tables = _sheet_tables(name, grid)
+        for t in tables:
+            t.meta = {"kind": "sheet", "sheet": name, "header_row": t.header[0].row if t.header else None,
+                      "row_count": r["row_count"]}
+        doc.tables.extend(tables)
         if r["page"] and r["page"]["has_more"]:
             doc.notes.append(f"rows_truncated:{name}:{r['row_count']}")
 
