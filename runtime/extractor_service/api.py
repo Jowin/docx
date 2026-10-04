@@ -31,6 +31,7 @@ from __future__ import annotations
 import hashlib
 import json
 import logging
+import os
 from contextlib import asynccontextmanager
 from typing import Any
 
@@ -40,6 +41,7 @@ from fastapi.responses import JSONResponse, PlainTextResponse
 
 from . import pipeline
 from .config_store import ConfigStore
+from . import config_store as config_store_mod
 from .errors import ConfigError, ServiceError
 from .gateway import Gateway
 from .graph import build_graph
@@ -116,7 +118,7 @@ def _headers(job: Any) -> dict[str, str]:
     return h
 
 
-def _job_view(store: JobStore, job: Any, *, with_result: bool = True) -> dict[str, Any]:
+def _job_view(store: JobStore, job: Any, *, with_result: bool = True, force_extended: bool = False) -> dict[str, Any]:
     out: dict[str, Any] = {"job_id": job["id"], "status": PUBLIC[job["status"]],
                            "created_at": job["created_at"], "client": job["client"], "usecase": job["usecase"]}
     if job["status"] == "done":
@@ -124,7 +126,7 @@ def _job_view(store: JobStore, job: Any, *, with_result: bool = True) -> dict[st
                     "audit_id": job["audit_id"], "human_corrected": bool(job["human_corrected"]),
                     "finished_at": job["finished_at"], "dead_lettered": bool(job["dead"])})
         if with_result:
-            out["result"] = pipeline.deliverable(json.loads(job["result"]), bool(job["extended"]))
+            out["result"] = pipeline.deliverable(json.loads(job["result"]), bool(job["extended"]) or force_extended)
     if job["callback_url"]:
         out["delivery"] = store.deliveries(job["id"])
     return out
@@ -162,6 +164,11 @@ def create_app(settings: pipeline.Settings | None = None, model_gateway: Gateway
                   description="Extract fields defined by a data dictionary from email, zip, CSV, Excel, PDF "
                               "and DOCX inputs. Answers now, by webhook, or by polling.")
     app.state.settings, app.state.store, app.state.jobs, app.state.runner = settings, store, jobs, runner
+    origins = [o.strip() for o in (os.environ.get("CORS_ORIGINS") or "").split(",") if o.strip()]
+    if origins:                                   # a browser console on another origin (the UI dev server)
+        from fastapi.middleware.cors import CORSMiddleware
+        app.add_middleware(CORSMiddleware, allow_origins=origins, allow_methods=["*"], allow_headers=["*"],
+                           expose_headers=["X-Extraction-Status", "X-Job-Id", "X-Audit-Id"])
 
     @app.exception_handler(ServiceError)
     async def _service_error(_: Request, exc: ServiceError) -> JSONResponse:
@@ -219,11 +226,12 @@ def create_app(settings: pipeline.Settings | None = None, model_gateway: Gateway
                             headers=_headers(job))
 
     @app.get("/extractions/{job_id}")
-    def get_extraction(job_id: str) -> JSONResponse:
+    def get_extraction(job_id: str, extended: bool = False) -> JSONResponse:
+        """``extended=true`` returns the full result (flags, sources, metadata) even for a clean run."""
         job = jobs.get(job_id)
         if job is None:
             raise ServiceError(404, "job_not_found", f"no job {job_id}")
-        return JSONResponse(_job_view(jobs, job), headers=_headers(job))
+        return JSONResponse(_job_view(jobs, job, force_extended=extended), headers=_headers(job))
 
     @app.get("/extractions")
     def list_extractions(status: str | None = None, client: str | None = None, flagged: bool | None = None,
@@ -316,12 +324,53 @@ def create_app(settings: pipeline.Settings | None = None, model_gateway: Gateway
     def configs() -> dict[str, Any]:
         return {"defaults": store.defaults(), "configs": store.catalogue()}
 
+    @app.get("/configs/{client}/{usecase}/releases")
+    def releases(client: str, usecase: str) -> dict[str, Any]:
+        rel = store.releases(client, usecase)
+        return {"client": client, "usecase": usecase, "managed": rel is not None,
+                "active": (rel or {}).get("active"), "rejected": (rel or {}).get("rejected", []),
+                "history": (rel or {}).get("history", []),
+                "versions": {v: store.status_of(client, usecase, v) for v in store.versions(client, usecase)}}
+
     @app.get("/configs/{client}/{usecase}/{version}")
     def config(client: str, usecase: str, version: str) -> dict[str, Any]:
         cfg = store.resolve(client, usecase, version)
+        types = {name: {"data_dictionary": t.dictionary.describe(), "skills": [s.name for s in t.skills],
+                        "accept_at": t.accept_at} for name, t in cfg.types.items()}
         return {**cfg.ref(), "manifest": cfg.manifest, "data_dictionary": cfg.dictionary.describe(),
                 "skills": [{"name": s.name, "applies_to": s.applies_to or None} for s in cfg.skills],
-                "ingestion_filter": {"active": cfg.ingestion_filter.active}}
+                "types": types or None, "default_type": cfg.default_type,
+                "detection": {t: {"keywords": len(r["keywords"]), "patterns": len(r["patterns"]),
+                                  "threshold": r["threshold"], "negative_signals": r["negatives"]}
+                              for t, r in (cfg.detection or {}).get("types", {}).items()} or None,
+                "ingestion_filter": {"active": cfg.ingestion_filter.active,
+                                     "layers": cfg.ingestion_filter.describe()}}
+
+    @app.get("/lookups")
+    def lookups(client: str | None = None, usecase: str | None = None) -> dict[str, Any]:
+        """The ingestion lookups that apply to a client and use case, most specific level first."""
+        from .ingest_filter import IngestionFilter, folders
+        for kind, value in (("client", client), ("usecase", usecase)):
+            if value is not None:
+                config_store_mod._check_segment(kind, value)
+        f = IngestionFilter.load(settings.config_root, client, usecase)
+        return {"client": client, "usecase": usecase,
+                "levels": [{"level": lvl, "path": str(path), "exists": path.is_dir()}
+                           for lvl, path in folders(settings.config_root, client, usecase)],
+                "layers": f.describe()}
+
+    @app.get("/inputs")
+    def inputs(limit: int = 500) -> dict[str, Any]:
+        """Files under INPUT_ROOT a request can name (relative paths), for consoles and smoke tests."""
+        root = settings.input_root.resolve()
+        files = []
+        if root.is_dir():
+            for p in sorted(root.rglob("*")):
+                if p.is_file() and not any(part.startswith(".") for part in p.relative_to(root).parts):
+                    files.append({"path": p.relative_to(root).as_posix(), "bytes": p.stat().st_size})
+                    if len(files) >= max(1, min(limit, 5000)):
+                        break
+        return {"input_root": str(root), "files": files}
 
     @app.get("/graph", response_class=PlainTextResponse)
     def graph_mermaid() -> str:

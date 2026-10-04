@@ -7,56 +7,39 @@ class RegistryError(Exception):
     code = "registry_error"
     status = 400
 
-
-class VersionExists(RegistryError):
-    """CTR-01: a published version is immutable; republishing it is refused."""
-
-    code = "version_exists"
-    status = 409
+    def __init__(self, message: str = "", detail: dict | None = None) -> None:
+        super().__init__(message)
+        self.detail = detail or {}
 
 
-class PackageNotFound(RegistryError):
-    code = "package_not_found"
+class VersionNotFound(RegistryError):
+    code = "version_not_found"
     status = 404
 
 
-class PackageCorrupt(RegistryError):
-    """CTR-02: a checksum recomputed on load did not match the manifest."""
+class ConfigTampered(RegistryError):
+    """The folder no longer hashes to what was published: a version folder is never edited."""
 
-    code = "package_corrupt"
+    code = "config_tampered"
     status = 422
-
-
-class EngineIncompatible(RegistryError):
-    """CTR-03: the engine version falls outside the package's engine_range."""
-
-    code = "engine_incompatible"
-    status = 409
-
-
-class TypeIncomplete(RegistryError):
-    """CTR-05: a declared email type is missing its schema or thresholds."""
-
-    code = "type_incomplete"
-    status = 422
-
-
-class VersionBumpInsufficient(RegistryError):
-    """CTR-17: the semver bump understates the artifact diff."""
-
-    code = "version_bump_insufficient"
-    status = 409
 
 
 class SignoffRequired(RegistryError):
-    """CTR-19: promotion needs a recorded human sign-off."""
+    """CTR-19: a release needs a recorded human sign-off."""
 
     code = "signoff_required"
     status = 403
 
 
+class SelfSignoff(RegistryError):
+    """CTR-19: the person (or run requester) who produced a version cannot be its only sign-off."""
+
+    code = "self_signoff"
+    status = 403
+
+
 class GateFailed(RegistryError):
-    """DT-34: a package that failed an evaluation gate cannot be promoted."""
+    """DT-34: a version that failed an evaluation gate is released only with an explicit, noted override."""
 
     code = "gate_failed"
     status = 403

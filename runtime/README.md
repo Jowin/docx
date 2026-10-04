@@ -184,17 +184,32 @@ never read and never reaches the model. It is listed in `metadata.skipped` with
 the rule that matched, and it raises no flag. An ignored input file gives an
 empty result flagged `input_ignored:<rule>`.
 
-Lookup data lives in `configs/lookups/` (every config) and
-`configs/<client>/<usecase>/<version>/lookups/` (one config):
+Lookup data lives beside the version folders, at three levels, so a change
+applies at once without cutting a config version:
+
+| Level | Folder | Applies to |
+| --- | --- | --- |
+| use case | `configs/<client>/<usecase>/lookups/` | one client's use case |
+| client | `configs/<client>/lookups/` | every use case of the client |
+| global | `configs/lookups/` | everything |
+
+The most specific level is checked first; within a level a *keep* match beats
+an *ignore* match, and the first level with a verdict decides. So a use case
+can keep a document type the global list ignores:
 
 ```json
 // ingestion.json
 {
   "ignore_names":  ["docusign", "*.ics", "re:^certificate of completion"],
   "ignore_hashes": ["<sha256 hex>", "md5:<md5 hex>"],
-  "ignore_kinds":  ["image"]
+  "ignore_kinds":  ["image"],
+  "keep_names":    ["docusign invoice"],
+  "keep_hashes":   []
 }
 ```
+
+`GET /lookups?client=&usecase=` shows the levels that apply and what each holds.
+`lookups` is a reserved name: never a client or a use case.
 
 A name entry matches the file name case-insensitively:
 - plain text matches anywhere in the name, so `docusign` ignores `Summary_DocuSign.pdf`;
@@ -205,9 +220,10 @@ Anything richer goes in `ingestion.decision.json`, a ZEN engine decision (JDM, a
 the ZEN editor exports it). It is evaluated for each item with `name`, `path`,
 `extension`, `kind`, `size`, `sha256`, `md5`, `container` (file, email, zip or
 embedded), `depth`, `sender`, `sender_domain`, `subject`, `client` and `usecase`,
-and returns `{"action": "ignore" | "keep", "rule": "..."}`.
+and returns `{"action": "ignore" | "keep", "rule": "..."}`; "keep" ends the
+search like a keep list does.
 
-The first rule that says ignore wins. A decision that errors keeps the item
+A decision that errors keeps the item
 and flags `ingestion_rule_error`, so a broken rule never silently drops a
 document. Malformed lookup data is a config problem reported by `/health`.
 
@@ -240,7 +256,7 @@ the run (RT-35, RT-51).
 ```
 START -> resolve_config -> ingest --(one Send per item)--> parse_item (parallel, sandboxed)
                                  \--(no items)----------------\
-      -> assemble -> (readable?) extract -> verify -> route -> END
+      -> assemble -> classify -> (readable and in scope?) extract -> verify -> route -> END
 ```
 
 | Node | Does |
@@ -248,7 +264,8 @@ START -> resolve_config -> ingest --(one Send per item)--> parse_item (parallel,
 | `resolve_config` | Picks the config folder; decides the model provider and name |
 | `ingest` | Checks the location, applies the ingestion filter, unpacks emails, zips and encrypted files, spools bytes |
 | `parse_item` | One branch per item: CSV, Excel, PDF (+OCR), DOCX, email body (+threads), in the sandbox |
-| `assemble` | The single join (RT-09): numbers documents, picks the skills whose fingerprint matches |
+| `assemble` | The single join (RT-09): numbers documents |
+| `classify` | Runs the config's detection rules (`rules/detection.json`) to pick the email type; narrows the config to that type's dictionary, skills and threshold; picks the skills whose fingerprint matches. Out of scope skips extraction |
 | `extract` | The stub or the model through the gateway; run and cost ceilings; a model failure becomes a flag |
 | `verify` | Grounds every value in the evidence, validates types, scores confidence |
 | `route` | Flags per record and for the run, in rule order, all of them (RT-43) |
@@ -258,16 +275,26 @@ START -> resolve_config -> ingest --(one Send per item)--> parse_item (parallel,
 
 ## Configs
 
+The config folders are the **source of truth**: what is served, and every
+version that ever was. Design-time writes new versions here (never edits one)
+and records releases in `releases.json`; the runtime only reads.
+
 ```
 configs/
   defaults.json                        {"client": "default", "usecase": "invoice", "version": "1.0.0"}
-  lookups/                             ingestion filter for every config (optional)
-  <client>/<usecase>/<version>/
-    manifest.json                      model, skills, thresholds, evidence, intake, limits, output
-    schema.json                        the data dictionary
-    prompts/system.md                  system prompt
-    skills/<name>.md                   one per skill, in manifest order
-    lookups/                           ingestion filter for this config (optional)
+  lookups/                             global ingestion lookups
+  <client>/lookups/                    the client's
+  <client>/<usecase>/
+    lookups/                           the use case's
+    releases.json                      which version is served, and the release history
+    <version>/
+      manifest.json                    model, skills, types, thresholds, evidence, intake, limits, output
+      schema.json                      the data dictionary (the default type's)
+      schemas/<type>.json              one more dictionary per extra email type
+      rules/detection.json             email-type detection rules (CTR-08)
+      prompts/system.md                system prompt
+      skills/<name>.md                 one per skill
+      provenance.json                  written by design-time: origin, base version, run, author
 ```
 
 Each part the request leaves out is filled in like this:
@@ -276,15 +303,56 @@ Each part the request leaves out is filled in like this:
 | --- | --- |
 | `client` | `defaults.json` |
 | `usecase` | `defaults.json` when the client is the default client; otherwise the client's only use case |
-| `version` | `defaults.json` when client and use case are the defaults; otherwise the highest version |
+| `version` | `releases.json`'s `active` when the use case has one (none active: `config_not_released`); otherwise `defaults.json` when client and use case are the defaults; otherwise the highest version |
 
-Treat a published version folder as read-only: change it by adding a new version.
+`"version": "latest"` asks for the highest version that is not rejected, and a
+request may name any version: that is how a **candidate** (a version newer than
+the active one) is tried before it is released. `metadata.config.release_status`
+says which kind served a result: `active`, `candidate`, `retired`, `rejected`
+or `unmanaged` (no `releases.json` yet).
+
+```json
+// releases.json (written by design-time when a person releases, rolls back or rejects)
+{"active": "1.2.0", "rejected": ["1.1.1"],
+ "history": [{"action": "release", "version": "1.2.0", "previous": "1.1.0", "by": "joe@acme.example",
+              "at": "2026-10-04T09:12:00+00:00", "note": "UAT ok"}]}
+```
+
+Treat a version folder as read-only: change it by adding a new version.
+
+### Email types and detection rules
+
+A version may declare several email types, each with its own dictionary,
+skills and accept threshold; top-level `skills` are shared by every type:
+
+```json
+"default_type": "invoice",
+"types": {
+  "invoice":    {"schema": "schema.json", "skills": [], "thresholds": {"accept_at": 0.85}},
+  "remittance": {"schema": "schemas/remittance.json", "skills": ["remit-fields"]}
+}
+```
+
+`rules/detection.json` is what design-time's Detection Rules agent writes:
+per type, keywords and patterns with weights, entity weights (MONEY and DATE
+are recognised), a `classification_threshold`, and `negative_signals` that
+each take 0.2 off. The `classify` node scores every type on the subject and
+document text, and records `metadata.classification` (`type`, `score`,
+per-type `scores`, `status`):
+
+| Status | What happens |
+| --- | --- |
+| `matched` | extract as that type |
+| `ambiguous` | two types within `classification.ambiguity_margin` (0.1): extract as the higher, flag `classification_ambiguous:<a>\|<b>` |
+| `out_of_scope` | nothing matched, or a type this config does not extract: flag `out_of_scope`, no records (or extract anyway with `"classification": {"out_of_scope": "extract"}`) |
+| `unclassified` | the version has no detection rules |
 
 `manifest.json` sections beyond the model and skills:
 
 | Section | Keys (defaults) |
 | --- | --- |
-| `thresholds` | `accept_at` (0.8) |
+| `thresholds` | `accept_at` (0.8); per type under `types.<t>.thresholds` |
+| `classification` | `out_of_scope` (`skip` or `extract`), `ambiguity_margin` (0.1) |
 | `evidence` | `rows` (200), `tail_rows` (10), `pages` (10), `tail_pages` (1), `max_sheets` (5), `max_chars_per_document` (60000), `ocr` (true), `ocr_timeout_s` (60), `parse_timeout_s` (120) |
 | `intake` | `max_zip_members` (200), `max_zip_uncompressed_mb` (200), `max_compression_ratio` (100), `max_zip_depth` (1), `max_email_depth` (3), `ocr_images` (false) |
 | `limits` | `run_ceiling_s` (300, RT-60), `max_cost_usd` (none, RT-62) |

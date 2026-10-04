@@ -6,10 +6,18 @@ item is never parsed and never reaches the model; it is recorded in
 ``metadata.skipped`` with the rule that matched, and it raises no flag (it
 was ignored on purpose).
 
-Lookup data lives in two places, both optional, both read in this order:
+Lookup data lives outside the version folders, at three levels, so it can
+change without cutting a config version:
 
-    <CONFIG_ROOT>/lookups/                     every client and use case
-    <CONFIG_ROOT>/<client>/<usecase>/<version>/lookups/    this config only
+    <CONFIG_ROOT>/lookups/                     every client and use case (global)
+    <CONFIG_ROOT>/<client>/lookups/            every use case of one client
+    <CONFIG_ROOT>/<client>/<usecase>/lookups/  one client's use case
+
+The most specific level is consulted first: use case, then client, then
+global. Within a level, a "keep" match wins over an "ignore" match, and the
+first level with a verdict decides; so a client can keep a document type the
+global list ignores (``keep_names`` / ``keep_hashes``, or a decision returning
+``"keep"``).
 
 and in each, two files:
 
@@ -18,7 +26,9 @@ and in each, two files:
     {
       "ignore_names":  ["docusign", "*.ics", "re:^certificate of completion"],
       "ignore_hashes": ["<sha256 hex>", "md5:<md5 hex>"],
-      "ignore_kinds":  ["image"]
+      "ignore_kinds":  ["image"],
+      "keep_names":    ["docusign invoice"],      (overrides wider levels)
+      "keep_hashes":   []
     }
 
   A name entry matches the file name case-insensitively: plain text matches
@@ -34,7 +44,7 @@ and in each, two files:
      "container" (file | email | msg | zip | embedded), "depth",
      "sender", "sender_domain", "subject", "client", "usecase"}
 
-The first rule that says "ignore" wins. A decision that fails to evaluate
+A decision that fails to evaluate
 keeps the item and adds the ``ingestion_rule_error`` flag, so a broken rule
 never silently drops a document.
 """
@@ -62,17 +72,45 @@ class Verdict:
     error: str | None = None
 
 
+LEVELS = ("usecase", "client", "global")          # most specific first
+_KEYS = {"ignore_names", "ignore_hashes", "ignore_kinds", "keep_names", "keep_hashes", "description"}
+
+
 @dataclass
 class _Rules:
-    scope: str                                     # "global" or "config"
+    scope: str                                     # "usecase", "client" or "global"
     names: list[tuple[str, Any]] = field(default_factory=list)   # (entry, matcher)
     sha256: set[str] = field(default_factory=set)
     md5: set[str] = field(default_factory=set)
     kinds: set[str] = field(default_factory=set)
+    keep_names: list[tuple[str, Any]] = field(default_factory=list)
+    keep_sha256: set[str] = field(default_factory=set)
+    keep_md5: set[str] = field(default_factory=set)
     decision: Any = None
+    source: str = ""
 
     def empty(self) -> bool:
-        return not (self.names or self.sha256 or self.md5 or self.kinds or self.decision)
+        return not (self.names or self.sha256 or self.md5 or self.kinds or self.decision
+                    or self.keep_names or self.keep_sha256 or self.keep_md5)
+
+    def describe(self) -> dict[str, Any]:
+        return {"level": self.scope, "path": self.source,
+                "ignore_names": [e for e, _ in self.names], "keep_names": [e for e, _ in self.keep_names],
+                "ignore_hashes": sorted(self.sha256) + [f"md5:{h}" for h in sorted(self.md5)],
+                "keep_hashes": sorted(self.keep_sha256) + [f"md5:{h}" for h in sorted(self.keep_md5)],
+                "ignore_kinds": sorted(self.kinds), "decision": self.decision is not None}
+
+
+def _hashes(values: Any, where: str) -> tuple[set[str], set[str]]:
+    sha, md5 = set(), set()
+    for h in values or []:
+        algo, _, value = str(h).strip().lower().rpartition(":")
+        algo = algo or ("md5" if len(value) == 32 else "sha256")
+        if algo not in ("sha256", "md5") or not _HEX.match(value) or \
+                len(value) != (64 if algo == "sha256" else 32):
+            raise ConfigError("config_invalid", f"{where}: {h!r} is not a sha256 or md5:<hex> hash")
+        (sha if algo == "sha256" else md5).add(value)
+    return sha, md5
 
 
 def _name_matcher(entry: str, where: str):
@@ -92,7 +130,7 @@ def _name_matcher(entry: str, where: str):
 
 
 def _load(folder: Path, scope: str) -> _Rules:
-    rules = _Rules(scope)
+    rules = _Rules(scope, source=str(folder))
     lists = folder / LISTS_FILE
     where = f"{scope} lookups/{LISTS_FILE}"
     if lists.is_file():
@@ -100,17 +138,12 @@ def _load(folder: Path, scope: str) -> _Rules:
             data = json.loads(lists.read_text(encoding="utf-8"))
         except json.JSONDecodeError as exc:
             raise ConfigError("config_invalid", f"{where} is not valid JSON: {exc}") from exc
-        if not isinstance(data, dict) or set(data) - {"ignore_names", "ignore_hashes", "ignore_kinds",
-                                                       "description"}:
-            raise ConfigError("config_invalid", f"{where}: keys are ignore_names, ignore_hashes, ignore_kinds")
+        if not isinstance(data, dict) or set(data) - _KEYS:
+            raise ConfigError("config_invalid", f"{where}: keys are {', '.join(sorted(_KEYS - {'description'}))}")
         rules.names = [(e, _name_matcher(e, where)) for e in data.get("ignore_names", [])]
-        for h in data.get("ignore_hashes", []):
-            algo, _, value = str(h).strip().lower().rpartition(":")
-            algo = algo or ("md5" if len(value) == 32 else "sha256")
-            if algo not in ("sha256", "md5") or not _HEX.match(value) or \
-                    len(value) != (64 if algo == "sha256" else 32):
-                raise ConfigError("config_invalid", f"{where}: {h!r} is not a sha256 or md5:<hex> hash")
-            (rules.sha256 if algo == "sha256" else rules.md5).add(value)
+        rules.keep_names = [(e, _name_matcher(e, where)) for e in data.get("keep_names", [])]
+        rules.sha256, rules.md5 = _hashes(data.get("ignore_hashes"), where)
+        rules.keep_sha256, rules.keep_md5 = _hashes(data.get("keep_hashes"), where)
         rules.kinds = {str(k).lower() for k in data.get("ignore_kinds", [])}
     decision = folder / DECISION_FILE
     if decision.is_file():
@@ -124,35 +157,65 @@ def _load(folder: Path, scope: str) -> _Rules:
     return rules
 
 
+def folders(config_root: Path, client: str | None, usecase: str | None) -> list[tuple[str, Path]]:
+    """The lookup folders for a client and use case, most specific first."""
+    root = Path(config_root)
+    out = []
+    if client and usecase:
+        out.append(("usecase", root / client / usecase / "lookups"))
+    if client:
+        out.append(("client", root / client / "lookups"))
+    out.append(("global", root / "lookups"))
+    return out
+
+
+def fingerprint(config_root: Path, client: str | None, usecase: str | None) -> str:
+    """A hash over every lookup file that applies, so a change is picked up without a new version."""
+    h = hashlib.sha256()
+    for level, folder in folders(config_root, client, usecase):
+        if folder.is_dir():
+            for p in sorted(x for x in folder.rglob("*") if x.is_file()):
+                h.update(f"{level}/{p.relative_to(folder).as_posix()}".encode() + b"\0" + p.read_bytes() + b"\0")
+    return h.hexdigest()
+
+
 class IngestionFilter:
-    """Global then per-config rules; ``check(item)`` says whether to ignore it."""
+    """Use case, client, then global rules; ``check(item)`` says whether to ignore it."""
 
     def __init__(self, layers: list[_Rules]) -> None:
         self.layers = [r for r in layers if not r.empty()]
 
     @classmethod
-    def load(cls, config_root: Path, config_folder: Path | None) -> "IngestionFilter":
-        layers = [_load(Path(config_root) / "lookups", "global")]
-        if config_folder is not None:
-            layers.append(_load(Path(config_folder) / "lookups", "config"))
-        return cls(layers)
+    def load(cls, config_root: Path, client: str | None = None, usecase: str | None = None) -> "IngestionFilter":
+        return cls([_load(folder, level) for level, folder in folders(config_root, client, usecase)])
 
     @property
     def active(self) -> bool:
         return bool(self.layers)
 
+    def describe(self) -> list[dict[str, Any]]:
+        return [r.describe() for r in self.layers]
+
     def check(self, item: dict[str, Any]) -> Verdict:
         if not self.layers:
             return Verdict(False)
         name = str(item.get("name", ""))
+        sha, md5 = item.get("sha256"), item.get("md5")
         for r in self.layers:
+            for entry, match in r.keep_names:
+                if match(name):
+                    return Verdict(False, f"{r.scope}:keep_name:{entry}")
+            if sha in r.keep_sha256:
+                return Verdict(False, f"{r.scope}:keep_sha256:{sha[:12]}")
+            if r.keep_md5 and md5 in r.keep_md5:
+                return Verdict(False, f"{r.scope}:keep_md5:{md5[:12]}")
             for entry, match in r.names:
                 if match(name):
                     return Verdict(True, f"{r.scope}:name:{entry}")
-            if item.get("sha256") in r.sha256:
-                return Verdict(True, f"{r.scope}:sha256:{item['sha256'][:12]}")
-            if r.md5 and item.get("md5") in r.md5:
-                return Verdict(True, f"{r.scope}:md5:{item['md5'][:12]}")
+            if sha in r.sha256:
+                return Verdict(True, f"{r.scope}:sha256:{sha[:12]}")
+            if r.md5 and md5 in r.md5:
+                return Verdict(True, f"{r.scope}:md5:{md5[:12]}")
             if str(item.get("kind", "")).lower() in r.kinds:
                 return Verdict(True, f"{r.scope}:kind:{item['kind']}")
             if r.decision is not None:
@@ -160,8 +223,11 @@ class IngestionFilter:
                     out = (r.decision.evaluate(item) or {}).get("result") or {}
                 except Exception as exc:                      # a broken rule keeps the item
                     return Verdict(False, error=f"{r.scope}:decision:{exc}"[:200])
-                if str(out.get("action", "")).lower() == "ignore":
+                action = str(out.get("action", "")).lower()
+                if action == "ignore":
                     return Verdict(True, f"{r.scope}:decision:{out.get('rule') or 'ignore'}")
+                if action == "keep":
+                    return Verdict(False, f"{r.scope}:decision:{out.get('rule') or 'keep'}")
         return Verdict(False)
 
 

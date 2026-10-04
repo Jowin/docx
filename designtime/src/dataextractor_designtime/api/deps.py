@@ -14,7 +14,7 @@ from ..model.gateway_client import default_client
 from ..registry.db import get_sessionmaker
 from ..registry.errors import RegistryError
 from ..records import ValidationError
-from ..registry.repository import Registry
+from ..registry.configs import ConfigRegistry
 
 
 def settings_dep() -> Settings:
@@ -45,8 +45,9 @@ def session_dep(request: Request) -> Iterator[Session]:
         session.close()
 
 
-def registry_dep(session: Session = Depends(session_dep)) -> Registry:
-    return Registry(session)
+def registry_dep(session: Session = Depends(session_dep)) -> ConfigRegistry:
+    """The registry of config versions, over the runtime config root it records."""
+    return ConfigRegistry(session, get_settings().runtime_config_root)
 
 
 def as_http(exc: Exception) -> HTTPException:
@@ -55,7 +56,8 @@ def as_http(exc: Exception) -> HTTPException:
         return HTTPException(status_code=422, detail={"code": "invalid_input", "message": str(exc),
                                                       "errors": exc.errors})
     if isinstance(exc, (RegistryError, AgentError)):
-        return HTTPException(
-            status_code=exc.status, detail={"code": exc.code, "message": str(exc)}
-        )
+        detail = {"code": exc.code, "message": str(exc)}
+        if getattr(exc, "detail", None):
+            detail["detail"] = exc.detail
+        return HTTPException(status_code=exc.status, detail=detail)
     return HTTPException(status_code=500, detail={"code": "internal_error", "message": str(exc)})

@@ -51,7 +51,7 @@ def learn_env(tmp_path, monkeypatch, client):
 
 
 def _versions(configs: Path, client="default", usecase="invoice") -> list[str]:
-    return sorted(p.name for p in (configs / client / usecase).iterdir())
+    return sorted(p.name for p in (configs / client / usecase).iterdir() if p.is_dir() and p.name[0].isdigit())
 
 
 def _extract(env, name: str, version: str) -> dict:
@@ -97,6 +97,12 @@ def test_ground_truth_failure_learns_a_new_version(learn_env):
 
     # the new version is on disk, lists the skill, and the runtime extracts with it
     assert _versions(configs) == ["1.0.0", "1.0.1"]
+    # a candidate: what was served is pinned, and the new version waits for a release
+    releases = json.loads((configs / "default/invoice/releases.json").read_text())
+    assert releases["active"] == "1.0.0" and releases["history"][0]["action"] == "adopt"
+    record = learn_env["client"].get("/configs/default/invoice/1.0.1").json()
+    assert record["status"] == "candidate" and record["provenance"]["origin"] == "learning"
+    assert record["record"]["origin"] == "learning" and record["record"]["gates_passed"] is True
     new = configs / "default/invoice/1.0.1"
     manifest = json.loads((new / "manifest.json").read_text())
     assert manifest["skills"][-1] == "hooli-remittance" and manifest["learned_patterns"] == ["hooli-remittance"]

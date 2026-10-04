@@ -1,17 +1,31 @@
-"""Evaluation Agent (DT-23 .. DT-28, DT-30, DT-35).
+"""Evaluation Agent (DT-23 .. DT-30, DT-35).
 
-Replays the runtime engine over the held-out corpus with the candidate package
-and reports the six gated metrics, a per-field error breakdown and failure
-exemplars. Deterministic: the same package over the same corpus produces the
-same report hash (DT-35).
+Replays the held-out corpus through an engine with the candidate config and
+reports the gated metrics, a per-field error breakdown and failure exemplars.
+Deterministic: the same config over the same corpus produces the same report
+hash (DT-35).
+
+``engine`` picks what extracts (DT-29):
+
+* ``runtime`` (the default): the real runtime, in an isolated process, with
+  the candidate written as a runtime config version folder (engine/runtime.py).
+  Give ``config_folder`` to evaluate a folder already written (the authoring
+  run does, so what is scored is what is published); otherwise the folder is
+  written from ``schemas``, ``detection``, ``thresholds`` and ``skills``.
+  Out-of-scope samples are run too and reported as ``scope`` (were they
+  turned away?).
+* ``reference``: the in-process reference engine, a deterministic stand-in kept
+  for quick component tests; it is not the engine that serves.
 """
 
 from __future__ import annotations
 
+import re
+import tempfile
 from collections import defaultdict
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from ..records import Record
 from ..config import get_settings
@@ -33,6 +47,47 @@ DEFAULT_GATES: dict[str, float] = {
 }
 #: DT-31: the platform floor that per-client config may not loosen.
 FALSE_ACCEPT_FLOOR = 0.01
+
+
+_ROWCOL = re.compile(r"^row(\d+)col(\d+)$", re.I)
+
+
+def _col_letters(n: int) -> str:
+    out = ""
+    while n > 0:
+        n, r = divmod(n - 1, 26)
+        out = chr(65 + r) + out
+    return out
+
+
+def canonical_source(locator: str | None) -> tuple[str, str] | None:
+    """One spelling for a cell locator: (file, "SHEET!B2" | "B2" | rest).
+
+    Both CTR-13 spellings meet here: the runtime's ``attachment:inv.xlsx#Summary!B2``
+    and ``attachment:inv.csv#B2``, and the corpus' ``attachment:inv.xlsx!Summary!B2``
+    and ``attachment:inv.csv#row2col2``.
+    """
+    if not locator:
+        return None
+    text = str(locator).strip()
+    for prefix in ("attachment:", "file:"):
+        if text.startswith(prefix):
+            text = text[len(prefix):]
+    if "#" in text:
+        name, rest = text.split("#", 1)
+    elif "!" in text:
+        name, rest = text.split("!", 1)
+    else:
+        return text.lower(), ""
+    m = _ROWCOL.match(rest)
+    if m:
+        rest = f"{_col_letters(int(m.group(2)))}{int(m.group(1))}"
+    return name.lower(), rest.upper()
+
+
+def same_source(got: str | None, expected: str | None) -> bool:
+    a, b = canonical_source(got), canonical_source(expected)
+    return a is not None and a == b
 
 
 @dataclass(kw_only=True)
@@ -79,6 +134,12 @@ class EvaluationInput(Record):
     gates: dict[str, float] = field(default_factory=lambda: dict(DEFAULT_GATES))
     #: Evaluate the held-out split only (DT-22); false evaluates everything.
     heldout_only: bool = True
+    #: runtime = the real runtime on a config folder (DT-29); reference = the in-process stand-in.
+    engine: Literal["runtime", "reference"] = "runtime"
+    #: An already-written runtime config version folder to evaluate (engine=runtime).
+    config_folder: str | None = None
+    #: Authored skills to write into the folder when it is built here (SkillBundle dicts).
+    skills: list[dict[str, Any]] = field(default_factory=list)
 
 
 @dataclass(kw_only=True)
@@ -111,7 +172,7 @@ class EvaluationAgent(DesignAgent[EvaluationInput, EvaluationOutput]):
 
         corpus = payload.corpus
         root = Path(payload.corpus_root) if payload.corpus_root else None
-        engine = ReferenceEngine(
+        reference = ReferenceEngine(
             schemas=payload.schemas,
             detection=payload.detection,
             thresholds=payload.thresholds,
@@ -130,6 +191,15 @@ class EvaluationAgent(DesignAgent[EvaluationInput, EvaluationOutput]):
             and (held is None or s.sample_id in held)
         ]
         targets.sort(key=lambda s: s.sample_id)
+        held_out = corpus.heldout_out_of_scope(settings.heldout_fraction) if payload.heldout_only else None
+        outside = sorted((s for s in corpus.samples if s.sample_id in labels and not labels[s.sample_id].in_scope
+                          and (held_out is None or s.sample_id in held_out)), key=lambda s: s.sample_id)
+        if payload.engine == "runtime":
+            outcomes = self._runtime_outcomes(payload, settings, targets + outside, root)
+            run = lambda sample: outcomes[sample.sample_id]       # noqa: E731
+        else:
+            run = lambda sample: reference.run(sample, root)      # noqa: E731
+            outside = []
 
         type_hits = 0
         reviewed = 0
@@ -150,7 +220,7 @@ class EvaluationAgent(DesignAgent[EvaluationInput, EvaluationOutput]):
 
         for sample in targets:
             label = labels[sample.sample_id]
-            outcome = engine.run(sample, root)
+            outcome = run(sample)
             produced = outcome.result or outcome.review
             observed_type = produced.type if produced else None
             if observed_type == label.email_type:
@@ -180,7 +250,7 @@ class EvaluationAgent(DesignAgent[EvaluationInput, EvaluationOutput]):
 
                 if name in label.field_sources:
                     attribution_expected += 1
-                    if got is not None and got.source == label.field_sources[name]:
+                    if got is not None and same_source(got.source, label.field_sources[name]):
                         attribution_correct += 1
                 elif got is not None:
                     attribution_excluded.append(f"{sample.sample_id}:{name}")
@@ -264,7 +334,12 @@ class EvaluationAgent(DesignAgent[EvaluationInput, EvaluationOutput]):
             for name in sorted(field_expected)
         ]
 
+        turned_away = [s.sample_id for s in outside
+                       if getattr(run(s), "classification", {}).get("status") == "out_of_scope"]
         report = {
+            "engine": payload.engine,
+            "scope": {"out_of_scope_samples": len(outside), "turned_away": len(turned_away),
+                      "accepted_by_mistake": sorted(set(s.sample_id for s in outside) - set(turned_away))},
             "corpus_id": corpus.meta.corpus_id,
             "corpus_size": len(targets),
             "heldout_only": payload.heldout_only,
@@ -292,10 +367,31 @@ class EvaluationAgent(DesignAgent[EvaluationInput, EvaluationOutput]):
             attribution_excluded=sorted(attribution_excluded),
         )
 
+    def _runtime_outcomes(self, payload: EvaluationInput, settings, samples, root):
+        from .. import configwriter
+        from ..engine.runtime import RuntimeEngine
+        from .packager import SkillBundle
+
+        if payload.config_folder:
+            engine = RuntimeEngine(settings, client=payload.client_id, usecase=payload.workflow_id,
+                                   folder=Path(payload.config_folder))
+            return engine.run(samples, root)
+        base, _ = configwriter.base_folder(settings.runtime_config_root, payload.client_id, payload.workflow_id)
+        with tempfile.TemporaryDirectory(prefix="dt-eval-cfg-") as t:
+            folder = configwriter.write_version(
+                Path(t) / "candidate", client=payload.client_id, usecase=payload.workflow_id,
+                schemas=payload.schemas, detection=payload.detection, thresholds=payload.thresholds,
+                skills=[SkillBundle.from_dict(b) for b in payload.skills], base=base)
+            engine = RuntimeEngine(settings, client=payload.client_id, usecase=payload.workflow_id, folder=folder)
+            return engine.run(samples, root)
+
     @staticmethod
     def _equal(got: Any, expected: Any) -> bool:
-        if isinstance(got, (int, float)) and isinstance(expected, (int, float)):
-            return abs(float(got) - float(expected)) < 0.005
+        if isinstance(got, (int, float)) or isinstance(expected, (int, float)):
+            try:                           # a runtime may write decimals as strings ("decimal_format")
+                return abs(float(str(got).replace(",", "")) - float(str(expected).replace(",", ""))) < 0.005
+            except ValueError:
+                pass
         return str(got).strip().lower() == str(expected).strip().lower()
 
     @staticmethod

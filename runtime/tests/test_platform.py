@@ -104,12 +104,12 @@ def test_filter_ignores_attachments_by_name_and_hash(settings, config_root, inpu
 
 def test_filter_rules_as_a_zen_decision_per_config(settings, config_root, input_root):
     _lookups(config_root, decision=_decision([('startsWith(lower($), "signed_")', "", "signed-copies"),
-                                             ("", "> 500000", "too-big")]), where="default/invoice/1.0.0")
+                                             ("", "> 500000", "too-big")]), where="default/invoice")
     (input_root / "m.eml").write_bytes(_email("x", ("Signed_contract.xlsx", invoice_xlsx()),
                                               ("invoice.xlsx", invoice_xlsx())))
     e = TestClient(_app(settings)).post("/extract", json={"file_location": "m.eml", "extended": True}).json()
     assert {"item": "Signed_contract.xlsx", "reason": "ignored_by_filter",
-            "rule": "config:decision:signed-copies"} in e["metadata"]["skipped"]
+            "rule": "usecase:decision:signed-copies"} in e["metadata"]["skipped"]
     assert [d["source"] for d in e["metadata"]["documents"]] == ["body", "attachment:invoice.xlsx"]
 
 

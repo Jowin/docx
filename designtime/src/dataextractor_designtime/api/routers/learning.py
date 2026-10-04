@@ -43,7 +43,7 @@ def _db_url(request: Request, settings: Settings) -> str:
 
 
 def _summary(row) -> LearnRunSummary:
-    return LearnRunSummary(id=row.id, created_at=row.created_at.isoformat(), client=row.client_id,
+    return LearnRunSummary(id=row.id, kind=row.kind or "pattern", created_at=row.created_at.isoformat(), client=row.client_id,
                            usecase=row.usecase, object=row.object_name, pattern_name=row.pattern_name,
                            source=row.source, outcome=row.outcome, base_version=row.base_version,
                            result_version=row.result_version, passed_before=row.passed_before,
@@ -182,15 +182,17 @@ def forget_hint(request: Request, client: str = Query(...), usecase: str = Query
     return {"forgotten": key}
 
 
-@router.get("/runs", summary="Learning runs, newest first", **docs(response=LearnRunSummary, many=True))
+@router.get("/runs", summary="Design runs, newest first: pattern learning and authoring (kind=)",
+            **docs(response=LearnRunSummary, many=True))
 def list_runs(
+    kind: str | None = Query(default=None, pattern="^(pattern|authoring)$"),
     client: str | None = Query(default=None),
     usecase: str | None = Query(default=None),
     pattern_name: str | None = Query(default=None),
     limit: int = Query(default=50, ge=1, le=500),
     store: LearningStore = Depends(store_dep),
 ):
-    return out([_summary(r) for r in store.list(client, usecase, pattern_name, limit)])
+    return out([_summary(r) for r in store.list(client, usecase, pattern_name, limit, kind=kind)])
 
 
 @router.get("/runs/{run_id}", summary="One learning run as recorded, attempts and skill included")
@@ -202,4 +204,5 @@ def get_run(run_id: str, store: LearningStore = Depends(store_dep)) -> Any:
     return {**out(_summary(row)), "source_sha256": row.source_sha256, "ground_truth": row.ground_truth,
             "reference_text": row.reference_text, "verdict_before": row.verdict_before,
             "verdict_after": row.verdict_after, "attempts": row.attempts, "skill_path": row.skill_path,
-            "skill": row.skill_markdown, "generated_by": row.generated_by, "error": row.error}
+            "skill": row.skill_markdown, "generated_by": row.generated_by, "error": row.error,
+            "path": row.path or []}

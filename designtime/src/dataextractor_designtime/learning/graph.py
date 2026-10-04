@@ -11,7 +11,11 @@
 Every extraction runs in the isolated runtime (``learning.runtime``) against a
 scratch copy of the configs, so the base and each candidate are tested by the
 engine that will serve them, and nothing reaches the live configs until
-``publish`` copies the accepted candidate in as a new patch version.
+``publish`` copies the accepted candidate in as a new patch version, through
+the same publisher as the authoring run (configroot.publish_version): the
+version is a *candidate*, recorded in the registry with the judge's verdict,
+and is served only after someone signs it off and releases it. Learning builds
+on the newest version that is not rejected, so successive calls accumulate.
 
 A candidate is accepted when it scores strictly better than the best so far
 (fewer wrong values, then fewer flags) and every earlier sample that passed on
@@ -36,6 +40,7 @@ from typing import Annotated, Any, TypedDict
 
 from langgraph.graph import END, START, StateGraph
 
+from .. import configroot
 from ..agents.base import AgentError
 from ..agents.extraction_judge import ExtractionJudge, ExtractionJudgeInput, ExtractionJudgeOutput
 from ..agents.pattern_skill_writer import PatternSkillWriter, PatternSkillWriterInput
@@ -233,9 +238,20 @@ def build_learning_graph(*, runtime: IsolatedRuntime, store: LearningStore, mode
                                             req.pattern_name, best["markdown"])
         if not req.publish:
             return {"result_version": state["candidate_version"], "published": False, "path": ["publish"]}
-        version = configs.publish(candidate, config_root, state["client"], state["usecase"],
-                                  state["base_version"])
-        return {"result_version": version, "published": True, "path": ["publish"]}
+        verdict = best["verdict"]
+        regressed = any(a.regressions for a in state["attempts"] if a.accepted)
+        published = configroot.publish_version(
+            candidate, config_root, state["client"], state["usecase"], base=state["base_version"], bump="patch",
+            origin="learning", created_by=req.requested_by, run_id=state["run_id"],
+            summary={"pattern_name": req.pattern_name, "source": req.source, "passed": verdict.passed,
+                     "score": verdict.score.to_dict()})
+        from ..registry.configs import ConfigRegistry
+        ConfigRegistry(store.session, config_root).record(
+            published, evaluation={"kind": "judge", "passed": verdict.passed, "score": verdict.score.to_dict(),
+                                   "failing_fields": verdict.failing_fields,
+                                   "regression_samples": len(state.get("regressions", []))},
+            gates_passed=verdict.passed and not regressed)
+        return {"result_version": published["version"], "published": True, "path": ["publish"]}
 
     def finish(state: LearnState) -> dict[str, Any]:
         return {"path": ["finish"]}
@@ -376,7 +392,7 @@ def _finish(state: dict[str, Any], *, store: LearningStore, memory: LearningMemo
                  verdict_after=after.to_dict() if after else None,
                  attempts=[a.to_dict() for a in state["attempts"]],
                  skill_path=skill_path if published else None,
-                 skill_markdown=best["markdown"] if best else None, error=None)
+                 skill_markdown=best["markdown"] if best else None, error=None, path=list(state["path"]))
     if memory is not None and outcome != "passed":
         memory.remember_pattern(state["client"], state["usecase"], req.pattern_name,
                                 applies_to=(best or {}).get("applies_to") or {}, run_id=run_id, outcome=outcome,

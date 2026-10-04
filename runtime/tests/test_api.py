@@ -156,8 +156,9 @@ def test_missing_required_field_is_flagged_and_returned_extended(client, input_r
 def test_configs_and_health(client):
     c = client.get("/configs").json()
     assert c["defaults"]["client"] == "default"
-    assert {"client": "acme", "usecase": "ap-invoices", "versions": ["1.0.0", "1.1.0"],
-            "latest": "1.1.0"} in c["configs"]
+    acme = next(x for x in c["configs"] if x["client"] == "acme")
+    assert (acme["usecase"], acme["versions"], acme["latest"], acme["managed"]) == \
+        ("ap-invoices", ["1.0.0", "1.1.0"], "1.1.0", False)
     one = client.get("/configs/acme/ap-invoices/1.1.0").json()
     assert one["manifest"]["model"]["provider"] == "gateway"
     assert client.get("/health").json()["status"] == "ok"

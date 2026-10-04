@@ -1,10 +1,17 @@
 # DataExtractor — design-time
 
-The design-time half of DataExtractor: the design agents, **pattern learning**
-(extract a sample in an isolated runtime and, when it fails, write a skill for
-its pattern into a new config version), a Postgres artifact registry, and an
-HTTP API that exposes **every component on its own** so each can be tested in
-isolation.
+The design-time half of DataExtractor: the design agents, the **authoring run**
+(a labelled corpus becomes a config version), **pattern learning** (one sample
+refines a version), the registry that records versions, sign-offs and
+releases, and an HTTP API that exposes **every component on its own** so each
+can be tested in isolation.
+
+**The runtime's config folders are the source of truth.** Both flows build a
+config version folder in the runtime's own layout, score it with the **real
+runtime** (in an isolated process), and publish it into the config root as a
+**candidate**. Nothing is served until a person signs it off and releases it,
+which rewrites the use case's `releases.json`. The Postgres registry is the
+record *about* the folders, never a second copy of them.
 
 Multi-step flows (the authoring run, the learning loop) are **LangGraph** state
 graphs. Contracts, agent inputs and outputs are typed records on stdlib
@@ -21,6 +28,7 @@ document that asked for it.
 cp .env.example .env
 docker compose up --build          # Postgres 16 + migrations + API on :8000, runtime on :8001 (+ a worker)
 open http://localhost:8000/docs    # OpenAPI: every component, typed
+open http://localhost:4173         # the console (../ui): both flows, releases, review
 ```
 
 The image is built from the repository root because it carries the runtime as
@@ -62,10 +70,10 @@ curl -sX POST localhost:8000/agents/corpus-profiler/run \
 | Skill Author Agent | `POST /agents/skill-author/run` | DT-12, DT-13 |
 | Threshold Tuner | `POST /agents/threshold-tuner/run` | DT-14 |
 | Evaluation Agent | `POST /agents/evaluation/run` | DT-23 … DT-31 |
-| Packager | `POST /agents/packager/run` | DT-15, DT-16, CTR-17 |
+| Packager | `POST /agents/packager/run` | DT-15, DT-16, CTR-17 (the CTR-02 manifest view; runs publish config folders) |
 | Extraction Judge | `POST /agents/extraction-judge/run` | pattern learning |
 | Pattern Skill Writer | `POST /agents/pattern-skill-writer/run` | pattern learning |
-| Registry | `/registry/...` | CTR-01 … CTR-05, CTR-17 … CTR-22 |
+| Config versions | `/configs/...`, `/lookups` | CTR-11, CTR-19, CTR-20, DT-34 |
 | Authoring run | `POST /runs` | DT-01 … DT-05 |
 | Pattern learning | `POST /learning/runs`, `POST /learning/runs/{id}/resume`, `GET /learning/runs[/{id}]` | see below |
 | Learning from corrections | `POST /learning/corrections` | runtime RT-46, DT-39 |
@@ -183,30 +191,63 @@ LangGraph's store and checkpointer manage their own tables (`store`,
 `checkpoints`, ...) with their own migrations, run on first use. Alembic manages
 the registry tables.
 
-`defaults.json` in the runtime configs still pins the version the *default*
-config serves; move it when a learned default version should go live. Client
-configs (`acme/...`) serve their latest version, so they pick learned versions
-up at once.
+A learned version is a candidate: the runtime serves it only when a request
+names it (or asks for `latest`) until someone signs it off and releases it
+(`/configs/...`, or the console).
 
-## The registry
+## One path for authoring and learning
 
-Postgres, six tables: `packages`, `artifacts`, `signoffs`, `promotions`,
-`activations`, and `learning_runs` (pattern learning's record and regression set). What it enforces, and where each rule comes from:
+```
+corpus ──► authoring run ──(next minor)──┐
+                                         ├─► version folder (candidate) ─► scored by the runtime
+sample ──► pattern learning ─(next patch)┘          │
+corrections ─┘                                      ▼
+                         sign-off (not by its creator) ─► release (releases.json) ─► served
+                                                    rollback / reject ◄─┘
+```
 
-- **CTR-01** a published `client_id/workflow_id@version` is immutable —
-  republishing returns `409 version_exists`.
-- **CTR-02** every artifact checksum is recomputed on load; a mismatch fails
-  with `package_corrupt` and the package is not used.
-- **CTR-03** a package outside the engine's `engine_range` is refused, not
-  partially loaded.
-- **CTR-04 / CTR-05** artifact paths stay inside the package, and every declared
-  email type has both a schema and a thresholds entry.
-- **CTR-17** the semver bump is derived from the artifact diff; one that
-  understates it is refused.
-- **CTR-19** promotion needs a passing evaluation report *and* a recorded human
-  sign-off. Gate-failed packages (DT-34) publish to UAT but never promote.
-- **CTR-20** exactly one active version per workflow, with the previous one kept
-  resident so rollback is a pointer change.
+| | Authoring run (`POST /runs`) | Pattern learning (`POST /learning/runs`) |
+| --- | --- | --- |
+| Input | a labelled corpus, confirmed types and critical fields | one sample, optional ground truth and reference text |
+| Builds | schemas per type, detection rules, skills, tuned thresholds (`configwriter.py`) | a skill with hints and a fingerprint, added to the base |
+| Builds on | the use case's latest version (settings, prompt, every learned skill), else the template config | the latest version that is not rejected |
+| Scored by | the runtime over the held-out corpus, twice (bootstrap, then tuned); out-of-scope samples must be turned away | the runtime on the sample and every earlier passing sample |
+| Publishes | the next minor (1.1.0 → 1.2.0), or 1.0.0 | the next patch (1.0.0 → 1.0.1) |
+
+Both publish through `configroot.publish_version`. The first publish into a use
+case without `releases.json` writes one that pins what is served at that moment,
+so publishing never changes serving. Both are logged in `learning_runs`
+(`kind` = `authoring` or `pattern`; `GET /learning/runs?kind=`).
+
+The evaluation agent (`/agents/evaluation/run`) scores with the runtime by
+default (`engine: "runtime"`, DT-29); `engine: "reference"` keeps the old
+in-process stand-in for quick component tests.
+
+## Config versions and releases
+
+| Route | Does |
+| --- | --- |
+| `GET /configs` | every use case: versions, status, what is served |
+| `GET /configs/{c}/{u}` | versions with their record, `releases.json`, the release log |
+| `GET /configs/{c}/{u}/{v}` | manifest, files, provenance, evaluation, sign-offs, whether the folder is intact |
+| `GET /configs/{c}/{u}/{v}/files/{path}` · `/diff?against=` | one file; a diff against the served version |
+| `POST /configs/{c}/{u}/{v}/signoff` | `{identity, note}` |
+| `POST /configs/{c}/{u}/{v}/release` | `{by, note, accept_gate_failure}` |
+| `POST /configs/{c}/{u}/{v}/reject` | `{by, note}`: never "latest", never built on |
+| `POST /configs/{c}/{u}/rollback` | `{by, note, to?}`: re-release the previous version |
+| `GET /lookups` · `PUT /lookups` | ingestion lookups at the use case, client or global level |
+| `GET /graphs/authoring` · `/graphs/learning` | the graphs as Mermaid |
+
+What a release enforces:
+
+- **CTR-19** at least one sign-off, and not from the version's creator (the run's `requested_by`).
+- **Integrity** the folder must still hash to what was recorded at publish; an edited version is refused (`config_tampered`).
+- **DT-34** a version whose evaluation gates failed is released only with `accept_gate_failure` and a note; the release log marks the override.
+- A hand-written folder is recorded (origin `manual`) the first time it is signed off or released.
+
+The registry tables are `config_versions`, `config_signoffs`, `config_releases`
+and `learning_runs`. The old package tables (`packages`, `artifacts`,
+`signoffs`, `promotions`, `activations`) are dropped by migration `7b1d0c2f9a41`.
 
 ## The model seam
 
@@ -230,13 +271,15 @@ the gateway alone.
 src/dataextractor_designtime/
   records.py       typed records on dataclasses: validation, JSON, JSON Schema
   contracts/       PRD 1 as records, validated on both sides of the seam
-  registry/        Postgres tables, semver rules, publish / sign-off / promote
+  configroot.py    the config folders: versions, releases.json, publish, release, rollback, reject
+  configwriter.py  authoring artifacts -> a runtime config version folder
+  registry/        Postgres record of config versions, sign-offs, releases, design runs
   agents/          the design agents, the judge and pattern skill writer, file-type and tabular tools
   learning/        the pattern-learning graph, isolated runtime, config versions, run store, memory
-  engine/          reference runtime engine the evaluation harness replays
+  engine/          runtime.py (the real runtime as evaluator) and reference.py (in-process stand-in)
   model/           the ModelClient seam, its deterministic stub, and the gateway client
   api/             one router per component; typed.py reads bodies and publishes schemas
-  orchestrator.py  the authoring run (DT-01) as a LangGraph graph
+  orchestrator.py  the authoring run (DT-01) as a LangGraph graph, publishing a config version
 alembic/           migrations
 samples/           deterministic corpus generator
 tests/             run against a live Postgres (learning tests also run the real runtime)
@@ -244,25 +287,22 @@ tests/             run against a live Postgres (learning tests also run the real
 
 ## Known gaps
 
-- **DT-29 is not yet satisfied.** The harness replays `engine/reference.py`, a
-  stand-in implementing the Phase 1 runtime path (classify, body + CSV/XLSX
-  extraction, merge, completeness, confidence, flag routing). The real engine is
-  PRD 3's build. Today's metrics describe this engine, not production; the
-  class interface is the swap point.
-- **The reference engine is Phase 1 only:** CSV and XLSX. The authoring run's
-  evaluation harness replays it; pattern learning instead runs the real runtime,
-  which reads PDF (with OCR), DOCX, encrypted attachments and embedded email.
+- **Evaluation needs the runtime's interpreter.** The authoring run and the
+  evaluation agent spawn `python -m extractor_service.cli` (`RUNTIME_DIR`,
+  `RUNTIME_PYTHON`); the image carries both.
 - **Stubbed judgment.** Alias grouping, term weighting, criticality proposal,
   band choice and skill-body authoring are rules, not model calls. Defensible
   and deterministic, not clever.
-- **No review surface.** Proposals come back as JSON with their evidence;
-  DT-32's accept/edit/reject UI is not built.
+- **The console reviews versions, not proposals.** `../ui` signs off, releases,
+  rolls back and diffs config versions; DT-32's step-by-step accept/edit of each
+  proposed artifact inside a run is not built (types are confirmed in the request).
 - **Fingerprints are heuristic.** A pattern is recognised by its sender domain,
   table headers or a title line. Two layouts with the same headers from the same
   sender share a fingerprint; `scope: global` skills apply everywhere, and the
   regression set is what guards them.
-- **No UAT / production split.** One registry, one channel; promotion sets state
-  and activation rather than copying between AWS accounts.
+- **One config root per environment.** Candidates and releases live in one
+  root; moving a released version between AWS accounts is copying its folder.
+- **No authentication.** `by` and `identity` are whatever the caller sends.
 
 ## Tests
 
@@ -274,6 +314,7 @@ TEST_DATABASE_URL=postgresql+psycopg2://designtime:designtime@localhost:5432/des
 
 The suite drops and recreates the schema (and LangGraph's store and checkpoint
 tables) per test, so point it at a database it is allowed to own.
-`tests/test_registry.py`, `tests/test_api.py` and `tests/test_learning.py`
-exercise real Postgres; the learning tests also run the real runtime from
+Every test gets its own copy of `../runtime/configs` as `RUNTIME_CONFIG_ROOT`.
+`tests/test_api.py`, `tests/test_determinism.py` and `tests/test_learning.py`
+exercise real Postgres; the authoring and learning tests also run the real runtime from
 `../runtime` in a child process (its requirements must be installed).

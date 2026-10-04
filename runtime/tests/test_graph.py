@@ -9,7 +9,7 @@ FULL = ["resolve_config", "ingest", "parse_item", "assemble", "extract", "verify
 
 def test_normal_run_visits_every_node(client):
     m = client.post("/extract", json={"file_location": "invoice.pdf", "extended": True}).json()["metadata"]
-    assert m["graph"]["path"] == ["resolve_config", "ingest", "parse_item:invoice.pdf", "assemble",
+    assert m["graph"]["path"] == ["resolve_config", "ingest", "parse_item:invoice.pdf", "assemble", "classify",
                                   "extract", "verify", "route"]
     assert set(m["timings_ms"]) == set(m["graph"]["path"])
 
@@ -28,7 +28,7 @@ def test_nothing_readable_skips_the_model(client, input_root):
         z.writestr("photo.png", logo_png())
     (input_root / "photos.zip").write_bytes(buf.getvalue())
     e = client.post("/extract", json={"file_location": "photos.zip", "extended": True}).json()
-    assert e["metadata"]["graph"]["path"] == ["resolve_config", "ingest", "assemble", "verify", "route"]
+    assert e["metadata"]["graph"]["path"] == ["resolve_config", "ingest", "assemble", "classify", "verify", "route"]
     assert e["flagged"] is True and "no_readable_content" in e["flags"]
     assert e["data"] == [] and e["records"] == []           # nothing to read: no records
 
@@ -37,4 +37,4 @@ def test_graph_endpoint_draws_the_pipeline(client):
     text = client.get("/graph").text
     for node in FULL:
         assert node in text
-    assert "assemble -.-> extract" in text or "assemble -.->" in text
+    assert "assemble --> classify" in text and "classify -.-> extract" in text

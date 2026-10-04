@@ -634,6 +634,7 @@ class Runner:
 
 #: The only types a checkpoint may be deserialized into: the run state's own.
 CHECKPOINT_TYPES = [("extractor_service.config_store", "ExtractionConfig"), ("extractor_service.config_store", "Skill"),
+                    ("extractor_service.config_store", "EmailType"),
                     ("extractor_service.schema", "DataDictionary"), ("extractor_service.schema", "Field"),
                     ("extractor_service.intake", "Submission"), ("extractor_service.intake", "Item"),
                     ("extractor_service.evidence", "Doc"), ("extractor_service.evidence", "Block"),

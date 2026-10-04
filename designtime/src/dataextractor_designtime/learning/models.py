@@ -170,6 +170,8 @@ class LearnResponse(Record):
 @dataclass(kw_only=True)
 class LearnRunSummary(Record):
     id: str
+    #: pattern (a learning call) or authoring (a corpus run): both publish config versions.
+    kind: str = "pattern"
     created_at: str
     client: str
     usecase: str

@@ -84,6 +84,16 @@ services:
       - ../runtime/configs:/configs:ro
       - ${LEARNING_DATA:-../runtime/data}:/data:ro
 
+  # The console for both flows: http://localhost:4173
+  ui:
+    build: ../ui
+    depends_on: [api, runtime]
+    environment:
+      RUNTIME_URL: http://runtime:8000
+      DESIGNTIME_URL: http://api:8000
+    ports:
+      - "4173:4173"
+
 volumes:
   designtime-pgdata:
   learning-state:

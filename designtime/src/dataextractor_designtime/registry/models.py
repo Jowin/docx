@@ -1,21 +1,19 @@
-"""Postgres tables behind the artifact registry.
+"""Postgres tables behind the registry.
 
-The registry is the single store of workflow packages (PRD 1). Design-time
-writes the UAT channel; promotion marks a package for production; runtime reads
-production only (RT-05).
+The registry is the record *about* the runtime's config folders, which are
+the source of truth (configroot.py): where each version came from, what it
+scored, who signed it off, every release; and the log of design runs.
 """
 
 from __future__ import annotations
 
 import uuid
 from datetime import datetime, timezone
-from enum import Enum
 from typing import Any
 
 from sqlalchemy import (
     Boolean,
     DateTime,
-    Enum as SAEnum,
     ForeignKey,
     Index,
     String,
@@ -40,147 +38,86 @@ def _now() -> datetime:
     return datetime.now(timezone.utc)
 
 
-class PackageState(str, Enum):
-    DRAFT = "draft"
-    PUBLISHED = "published"      # in the UAT channel
-    PROMOTED = "promoted"        # copied to production
-    DEPRECATED = "deprecated"    # superseded by a newer promoted version
-    WITHDRAWN = "withdrawn"      # defect found before promotion
-    ROLLED_BACK = "rolled_back"  # promoted, then rolled back after an incident
+class ConfigVersionRow(Base):
+    """The record of one config version folder: where it came from and what it scored.
 
+    The folder (runtime config root) is the source of truth; this row is the
+    record about it. ``sha256`` is the folder hash when it was published; a
+    release is refused when the folder no longer matches.
+    """
 
-class PackageRow(Base):
-    """One immutable workflow package version (CTR-01)."""
-
-    __tablename__ = "packages"
+    __tablename__ = "config_versions"
     __table_args__ = (
-        UniqueConstraint("client_id", "workflow_id", "version", name="uq_package_coordinate"),
-        Index("ix_packages_workflow", "client_id", "workflow_id"),
+        UniqueConstraint("client_id", "usecase", "version", name="uq_config_version"),
+        Index("ix_config_versions_usecase", "client_id", "usecase"),
     )
 
     id: Mapped[str] = mapped_column(UUIDType, primary_key=True, default=_uuid)
     client_id: Mapped[str] = mapped_column(String(128), nullable=False)
-    workflow_id: Mapped[str] = mapped_column(String(128), nullable=False)
+    usecase: Mapped[str] = mapped_column(String(128), nullable=False)
     version: Mapped[str] = mapped_column(String(32), nullable=False)
-
-    engine_range: Mapped[str] = mapped_column(String(64), nullable=False)
-    email_types: Mapped[list[str]] = mapped_column(JSONType, nullable=False, default=list)
-    source_corpus_id: Mapped[str] = mapped_column(String(256), nullable=False)
+    #: authoring | learning | manual
+    origin: Mapped[str] = mapped_column(String(16), nullable=False)
+    base_version: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    #: The design run (authoring or learning) that produced it.
+    run_id: Mapped[str | None] = mapped_column(String(64), nullable=True)
+    sha256: Mapped[str] = mapped_column(String(64), nullable=False)
+    files: Mapped[dict[str, Any]] = mapped_column(JSONType, nullable=False, default=dict)
+    #: Evaluation summary: metrics, gates, gate results (authoring), the judge's verdict (learning).
+    evaluation: Mapped[dict[str, Any] | None] = mapped_column(JSONType, nullable=True)
+    #: False when an evaluation gate failed; a release then needs an explicit override.
+    gates_passed: Mapped[bool | None] = mapped_column(Boolean, nullable=True)
     created_by: Mapped[str] = mapped_column(String(256), nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, nullable=False)
 
-    #: The manifest exactly as published. Checksums are recomputed against it
-    #: on every load (CTR-02).
-    manifest: Mapped[dict[str, Any]] = mapped_column(JSONType, nullable=False)
-    manifest_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
-
-    eval_report: Mapped[dict[str, Any] | None] = mapped_column(JSONType, nullable=True)
-    eval_report_sha256: Mapped[str | None] = mapped_column(String(64), nullable=True)
-    #: DT-34: publishable to UAT, but blocked from promotion.
-    gate_failed: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
-
-    state: Mapped[PackageState] = mapped_column(
-        SAEnum(PackageState, name="package_state", native_enum=False, length=16),
-        default=PackageState.PUBLISHED,
-        nullable=False,
-    )
-
-    artifacts: Mapped[list["ArtifactRow"]] = relationship(
-        back_populates="package", cascade="all, delete-orphan", lazy="selectin"
-    )
-    signoffs: Mapped[list["SignoffRow"]] = relationship(
-        back_populates="package", cascade="all, delete-orphan", lazy="selectin"
-    )
-    promotions: Mapped[list["PromotionRow"]] = relationship(
-        back_populates="package", cascade="all, delete-orphan", lazy="selectin"
-    )
-
-    @property
-    def coordinate(self) -> str:
-        return f"{self.client_id}/{self.workflow_id}@{self.version}"
+    signoffs: Mapped[list["ConfigSignoffRow"]] = relationship(
+        back_populates="config_version", cascade="all, delete-orphan", order_by="ConfigSignoffRow.created_at")
 
 
-class ArtifactRow(Base):
-    """One artifact file inside a package, with its published checksum."""
+class ConfigSignoffRow(Base):
+    """CTR-19: a named person accepted a config version for release."""
 
-    __tablename__ = "artifacts"
-    __table_args__ = (UniqueConstraint("package_id", "path", name="uq_artifact_path"),)
+    __tablename__ = "config_signoffs"
+    __table_args__ = (UniqueConstraint("config_version_id", "identity", name="uq_config_signoff"),)
 
     id: Mapped[str] = mapped_column(UUIDType, primary_key=True, default=_uuid)
-    package_id: Mapped[str] = mapped_column(
-        UUIDType, ForeignKey("packages.id", ondelete="CASCADE"), nullable=False
-    )
-    path: Mapped[str] = mapped_column(String(512), nullable=False)
-    kind: Mapped[str] = mapped_column(String(32), nullable=False)
-    sha256: Mapped[str] = mapped_column(String(64), nullable=False)
-    #: JSON artifacts hold their parsed content; a skill body holds its text.
-    content: Mapped[dict[str, Any] | None] = mapped_column(JSONType, nullable=True)
-    body: Mapped[str | None] = mapped_column(Text, nullable=True)
-    generated_by: Mapped[str] = mapped_column(String(256), nullable=False)
-    reviewed_by: Mapped[str | None] = mapped_column(String(256), nullable=True)
-
-    package: Mapped[PackageRow] = relationship(back_populates="artifacts")
-
-
-class SignoffRow(Base):
-    """Immutable human sign-off against a specific eval report (DT-33)."""
-
-    __tablename__ = "signoffs"
-
-    id: Mapped[str] = mapped_column(UUIDType, primary_key=True, default=_uuid)
-    package_id: Mapped[str] = mapped_column(
-        UUIDType, ForeignKey("packages.id", ondelete="CASCADE"), nullable=False
-    )
+    config_version_id: Mapped[str] = mapped_column(
+        UUIDType, ForeignKey("config_versions.id", ondelete="CASCADE"), nullable=False)
     identity: Mapped[str] = mapped_column(String(256), nullable=False)
-    signed_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, nullable=False)
-    eval_report_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
     note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, nullable=False)
 
-    package: Mapped[PackageRow] = relationship(back_populates="signoffs")
-
-
-class PromotionRow(Base):
-    """Who promoted what, when, against which report (CTR-21). Append-only."""
-
-    __tablename__ = "promotions"
-
-    id: Mapped[str] = mapped_column(UUIDType, primary_key=True, default=_uuid)
-    package_id: Mapped[str] = mapped_column(
-        UUIDType, ForeignKey("packages.id", ondelete="CASCADE"), nullable=False
-    )
-    promoted_by: Mapped[str] = mapped_column(String(256), nullable=False)
-    promoted_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, nullable=False)
-    eval_report_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
-    #: Recorded at promotion so CTR-18 can be re-verified at any later time.
-    manifest_sha256: Mapped[str] = mapped_column(String(64), nullable=False)
-    action: Mapped[str] = mapped_column(String(16), default="promote", nullable=False)
-
-    package: Mapped[PackageRow] = relationship(back_populates="promotions")
+    config_version: Mapped[ConfigVersionRow] = relationship(back_populates="signoffs")
 
 
-class ActivationRow(Base):
-    """CTR-20: exactly one active version per workflow, previous kept for rollback."""
+class ConfigReleaseRow(Base):
+    """Every release, rollback and rejection, mirrored from releases.json with who and why."""
 
-    __tablename__ = "activations"
-    __table_args__ = (UniqueConstraint("client_id", "workflow_id", name="uq_activation_workflow"),)
+    __tablename__ = "config_releases"
+    __table_args__ = (Index("ix_config_releases_usecase", "client_id", "usecase"),)
 
     id: Mapped[str] = mapped_column(UUIDType, primary_key=True, default=_uuid)
     client_id: Mapped[str] = mapped_column(String(128), nullable=False)
-    workflow_id: Mapped[str] = mapped_column(String(128), nullable=False)
-    active_package_id: Mapped[str | None] = mapped_column(
-        UUIDType, ForeignKey("packages.id", ondelete="RESTRICT"), nullable=True
-    )
-    previous_package_id: Mapped[str | None] = mapped_column(
-        UUIDType, ForeignKey("packages.id", ondelete="RESTRICT"), nullable=True
-    )
-    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, nullable=False)
+    usecase: Mapped[str] = mapped_column(String(128), nullable=False)
+    #: release | rollback | reject
+    action: Mapped[str] = mapped_column(String(16), nullable=False)
+    version: Mapped[str] = mapped_column(String(32), nullable=False)
+    previous: Mapped[str | None] = mapped_column(String(32), nullable=True)
+    by: Mapped[str] = mapped_column(String(256), nullable=False)
+    note: Mapped[str | None] = mapped_column(Text, nullable=True)
+    #: The release went ahead although an evaluation gate had failed.
+    gate_override: Mapped[bool] = mapped_column(Boolean, default=False, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, nullable=False)
 
 
 class LearningRunRow(Base):
-    """One call of the pattern-learning loop: what was tried, what it scored, what it wrote.
+    """One design run: a pattern-learning call (kind ``pattern``) or an authoring run (``authoring``).
 
-    Append-only. Rows whose outcome left the source passing double as the
-    regression set for later learning on the same client and use case.
+    Both kinds write config versions through the same publisher, so they share
+    one log. For an authoring run ``pattern_name`` is "authoring", ``source`` the
+    corpus id, ``attempts`` the stage records and ``verdict_after`` the final
+    evaluation. Append-only. Pattern rows whose outcome left the source passing
+    double as the regression set for later learning on the same use case.
     """
 
     __tablename__ = "learning_runs"
@@ -189,6 +126,8 @@ class LearningRunRow(Base):
     )
 
     id: Mapped[str] = mapped_column(UUIDType, primary_key=True, default=_uuid)
+    #: pattern | authoring
+    kind: Mapped[str] = mapped_column(String(16), nullable=False, default="pattern", server_default="pattern")
     client_id: Mapped[str] = mapped_column(String(128), nullable=False)
     usecase: Mapped[str] = mapped_column(String(128), nullable=False)
     object_name: Mapped[str | None] = mapped_column(String(128), nullable=True)
@@ -211,6 +150,8 @@ class LearningRunRow(Base):
     skill_path: Mapped[str | None] = mapped_column(String(512), nullable=True)
     skill_markdown: Mapped[str | None] = mapped_column(Text, nullable=True)
     error: Mapped[dict[str, Any] | None] = mapped_column(JSONType, nullable=True)
+    #: The graph nodes the run went through, in order.
+    path: Mapped[list[str] | None] = mapped_column(JSONType, nullable=True)
     generated_by: Mapped[str] = mapped_column(String(256), nullable=False)
     requested_by: Mapped[str] = mapped_column(String(256), nullable=False)
     created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), default=_now, nullable=False)

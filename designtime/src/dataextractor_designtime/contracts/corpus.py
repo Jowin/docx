@@ -95,3 +95,11 @@ class Corpus(Record):
             take = max(1, round(len(scored) * fraction))
             held.update(scored[:take])
         return held
+
+    def heldout_out_of_scope(self, fraction: float = 0.2) -> set[str]:
+        """The same deterministic hold-out over out-of-scope samples: what evaluation checks is turned away."""
+        ids = sorted(self.out_of_scope_ids())
+        if not ids:
+            return set()
+        scored = sorted(ids, key=lambda sid: hashlib.sha256(f"{self.meta.corpus_id}:{sid}".encode()).hexdigest())
+        return set(scored[:max(1, round(len(ids) * fraction))])

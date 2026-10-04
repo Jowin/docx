@@ -12,7 +12,6 @@ sys.path.insert(0, str(ROOT / "samples"))
 
 from dataextractor_designtime.contracts.corpus import Corpus  # noqa: E402
 from dataextractor_designtime.registry.db import Base, get_engine, get_sessionmaker  # noqa: E402
-from dataextractor_designtime.registry.repository import Registry  # noqa: E402
 
 TEST_DATABASE_URL = os.getenv(
     "TEST_DATABASE_URL",
@@ -63,9 +62,23 @@ def db_session(db_url: str):
         session.close()
 
 
-@pytest.fixture()
-def registry(db_session) -> Registry:
-    return Registry(db_session)
+RUNTIME_DIR = Path(__file__).resolve().parents[2] / "runtime"
+
+
+@pytest.fixture(autouse=True)
+def runtime_configs(tmp_path, monkeypatch) -> Path:
+    """Every test gets its own copy of the runtime's config folders and evaluates with the stub."""
+    import shutil
+    import sys
+
+    root = tmp_path / "runtime-configs"
+    shutil.copytree(RUNTIME_DIR / "configs", root)
+    monkeypatch.setenv("RUNTIME_DIR", str(RUNTIME_DIR))
+    monkeypatch.setenv("RUNTIME_PYTHON", sys.executable)
+    monkeypatch.setenv("RUNTIME_CONFIG_ROOT", str(root))
+    monkeypatch.setenv("LEARNING_MODEL_PROVIDER", "stub")
+    monkeypatch.delenv("MODEL_GATEWAY_URL", raising=False)
+    return root
 
 
 def _drop_langgraph_tables(engine) -> None:

@@ -102,5 +102,5 @@ def test_authoring_run_is_a_langgraph_graph():
     from dataextractor_designtime.orchestrator import build_authoring_graph
     nodes = list(build_authoring_graph().get_graph().nodes)
     assert nodes[1:-1] == ["intake", "profile", "discover_types", "confirm_types", "field_schemas",
-                           "detection_rules", "author_skills", "evaluate_bootstrap", "tune_thresholds",
-                           "evaluate_final", "package"]
+                           "detection_rules", "author_skills", "build_config", "evaluate_bootstrap",
+                           "tune_thresholds", "evaluate_final", "publish"]

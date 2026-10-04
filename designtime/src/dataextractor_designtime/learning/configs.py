@@ -1,9 +1,9 @@
-"""Config-folder operations for learning: scratch copies, candidate versions, publication.
+"""Config-folder operations for learning: scratch copies and candidate versions.
 
-Folders follow the runtime's layout (``<root>/<client>/<usecase>/<version>/``
-with ``manifest.json``, ``schema.json``, ``prompts/`` and ``skills/``). A
-published version is never modified: learning always writes a new patch
-version next to its base (1.0.0 -> 1.0.1, or the next free patch).
+Folders follow the runtime's layout (``<root>/<client>/<usecase>/<version>/``).
+A candidate is built in the scratch copy; publishing it into the live root is
+configroot.publish_version, shared with the authoring run (the next free
+patch on the base: 1.0.0 -> 1.0.1).
 """
 
 from __future__ import annotations
@@ -57,11 +57,8 @@ def scratch_copy(config_root: Path) -> tuple[tempfile.TemporaryDirectory, Path]:
 
 
 def versions(root: Path, client: str, usecase: str) -> list[str]:
-    folder = Path(root) / client / usecase
-    if not folder.is_dir():
-        return []
-    return sorted((p.name for p in folder.iterdir() if p.is_dir() and _SEMVER.match(p.name)),
-                  key=lambda v: tuple(int(x) for x in v.split(".")))
+    from ..configroot import versions as _versions
+    return _versions(root, client, usecase)
 
 
 def next_patch(base: str, *taken: list[str]) -> str:
@@ -130,43 +127,8 @@ def write_candidate(root: Path, client: str, usecase: str, base: str, version: s
     if pattern not in skills:
         skills.append(pattern)
     manifest["skills"] = skills
-    if "version" in manifest:
-        manifest["version"] = version
+    manifest["version"] = version
     learned = [p for p in manifest.get("learned_patterns", []) if p != pattern]
     manifest["learned_patterns"] = learned + [pattern]
     manifest_path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
     return dst
-
-
-def publish(candidate: Path, root: Path, client: str, usecase: str, base: str) -> str:
-    """Copy a tested candidate into the live root as the next free patch; returns its version.
-
-    The version folder is created exclusively, so two learning calls racing for
-    the same number get different versions rather than one overwriting the other.
-    """
-    parent = Path(root) / client / usecase
-    tried: list[str] = []
-    for _ in range(50):
-        version = next_patch(base, versions(root, client, usecase), tried)
-        dst = parent / version
-        try:
-            dst.mkdir(parents=False)
-        except FileExistsError:
-            tried.append(version)
-            continue
-        try:
-            for item in candidate.iterdir():
-                if item.is_dir():
-                    shutil.copytree(item, dst / item.name, ignore=_ignore)
-                else:
-                    shutil.copy2(item, dst / item.name)
-            manifest_path = dst / "manifest.json"
-            manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-            if "version" in manifest:
-                manifest["version"] = version
-                manifest_path.write_text(json.dumps(manifest, indent=2) + "\n", encoding="utf-8")
-        except Exception:
-            shutil.rmtree(dst, ignore_errors=True)
-            raise
-        return version
-    raise AgentError("no free version to publish to", code="version_exhausted", status=409)

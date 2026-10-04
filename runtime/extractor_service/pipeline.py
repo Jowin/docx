@@ -33,7 +33,7 @@ from .errors import ModelError, ServiceError
 from .schema import to_json
 from .verify import field_out
 
-ENGINE_VERSION = "0.4.0"
+ENGINE_VERSION = "0.5.0"
 
 
 def _default_sandbox() -> str:
@@ -202,6 +202,7 @@ def _result(settings: Settings, state: dict[str, Any], file_location: str, t0: f
                            "sha256": d.sha256, "blocks": len(d.blocks), "notes": d.notes,
                            **({"reason": d.reason} if d.reason else {})} for d in docs],
             "skipped": sub.skipped,
+            "classification": _classification(state.get("classification")),
             "skills_applied": state.get("skills_applied") or [],
             "keys_used": sub.keys_used,
             "record_count": len(records),
@@ -216,6 +217,17 @@ def _result(settings: Settings, state: dict[str, Any], file_location: str, t0: f
     _write_audit(settings, extended)
     return Outcome(data=data_out, extended=extended, flagged=state["flagged"], audit_id=state["audit_id"],
                    flags=state["reasons"], cfg=cfg, docs=docs)
+
+
+def _classification(c: dict[str, Any] | None) -> dict[str, Any]:
+    """The classification outcome for the result: type, score, status and per-type scores."""
+    if not c:
+        return {"status": "unclassified", "type": None}
+    out = {k: c[k] for k in ("status", "type", "score", "runner_up", "nearest") if c.get(k) is not None}
+    out["scores"] = {t: {"score": v["score"], "threshold": v["threshold"], "matched": v["matched"],
+                         **({"negative_signals": v["negative_signals"]} if v.get("negative_signals") else {})}
+                     for t, v in (c.get("scores") or {}).items()}
+    return out
 
 
 def _failed(settings: Settings, request: dict[str, Any], code: str, message: str, detail: dict[str, Any],

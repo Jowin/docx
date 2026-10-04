@@ -1,4 +1,5 @@
-"""Learning runs in the Postgres registry: the record of each call, and the regression set."""
+"""Design runs in the Postgres registry (pattern learning and authoring): the record of each, and the
+regression set (pattern runs only)."""
 
 from __future__ import annotations
 
@@ -44,10 +45,10 @@ class LearningStore:
         return row
 
     def list(self, client: str | None = None, usecase: str | None = None,
-             pattern_name: str | None = None, limit: int = 50) -> list[LearningRunRow]:
+             pattern_name: str | None = None, limit: int = 50, kind: str | None = None) -> list[LearningRunRow]:
         stmt = select(LearningRunRow)
         for col, value in ((LearningRunRow.client_id, client), (LearningRunRow.usecase, usecase),
-                           (LearningRunRow.pattern_name, pattern_name)):
+                           (LearningRunRow.pattern_name, pattern_name), (LearningRunRow.kind, kind)):
             if value:
                 stmt = stmt.where(col == value)
         stmt = stmt.order_by(LearningRunRow.created_at.desc()).limit(max(1, min(limit, 500)))
@@ -61,7 +62,8 @@ class LearningStore:
         are re-run against every candidate before it is accepted.
         """
         stmt = (select(LearningRunRow)
-                .where(LearningRunRow.client_id == client, LearningRunRow.usecase == usecase)
+                .where(LearningRunRow.client_id == client, LearningRunRow.usecase == usecase,
+                       LearningRunRow.kind == "pattern")
                 .order_by(LearningRunRow.created_at.desc()))
         seen: set[str] = set()
         out: list[LearningRunRow] = []

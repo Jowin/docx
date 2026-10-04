@@ -2,16 +2,19 @@
 
     START -> resolve_config -> ingest --(one Send per item)--> parse_item (parallel, sandboxed)
                                      \\-(no items)-----------\\
-          -> assemble -> (readable?) extract -> verify -> route -> END
-                                    \\------------^
+          -> assemble -> classify -> (readable and in scope?) extract -> verify -> route -> END
+                                    \\------------------------------------^
 
 * ``ingest`` opens the input, applies the ingestion filter, unpacks emails
   (recursively), zips and encrypted files, and spools item bytes (RT-34).
 * ``parse_item`` runs once per item, concurrently (bounded by the config's
   ``concurrency.max_parallel``, RT-41), each in a sandboxed child process
   under a time budget (RT-39, RT-65). A failed item degrades the run (RT-10).
-* ``assemble`` is the single join (RT-09): it numbers the documents and picks
-  the skills whose fingerprint matches them (scope.py).
+* ``assemble`` is the single join (RT-09): it numbers the documents.
+* ``classify`` runs the config's detection rules (classify.py) to pick the
+  email type, narrows the config to that type's dictionary, skills and
+  threshold, and picks the skills whose fingerprint matches (scope.py). An
+  out-of-scope email skips extraction and is flagged ``out_of_scope``.
 * ``extract`` asks the stub or the model; a model failure, the run ceiling
   (RT-60) or the cost ceiling (RT-62) become flags, never an exception.
 * ``verify`` grounds every value; ``route`` turns reasons into flags.
@@ -30,6 +33,7 @@ from typing import Annotated, Any, Callable, TypedDict
 from langgraph.graph import END, START, StateGraph
 from langgraph.types import Send
 
+from . import classify as classify_mod
 from . import gateway as gateway_mod
 from . import sandbox, scope
 from .config_store import ConfigStore, ExtractionConfig
@@ -65,6 +69,7 @@ class RunState(TypedDict, total=False):
     parsed: Annotated[list[Doc], operator.add]
     docs: list[Doc]
     skills_applied: list[str]
+    classification: dict[str, Any]
     reasons: list[str]
     raw: dict[str, Any]
     model_call: dict[str, Any]
@@ -148,11 +153,30 @@ def build_graph(store: ConfigStore, settings: Any, gateway: Gateway | None = Non
     def assemble(state: RunState) -> dict[str, Any]:
         docs = number_docs(list(state.get("parsed") or []))
         reasons = list(state["reasons"]) + [d.reason for d in docs if d.status == "failed" and d.reason]
-        _, skills = state["cfg"].for_documents(scope.facts(state["sub"], [d for d in docs if d.status == "read"]))
-        return {"docs": docs, "reasons": reasons, "skills_applied": [s.name for s in skills]}
+        return {"docs": docs, "reasons": reasons}
+
+    def classify(state: RunState) -> dict[str, Any]:
+        cfg, sub = state["cfg"], state["sub"]
+        readable = [d for d in state["docs"] if d.status == "read"]
+        result = classify_mod.classify(cfg, classify_mod.submission_text(sub, readable)) if readable else \
+            {"status": "unclassified", "type": cfg.default_type, "score": None, "scores": {}}
+        reasons = list(state["reasons"])
+        if result["status"] == "out_of_scope":
+            reasons.append("out_of_scope" + (f":{result['type']}" if result.get("type") else ""))
+        elif result["status"] == "ambiguous":
+            reasons.append(f"classification_ambiguous:{result['type']}|{result['runner_up']}")
+        typed = cfg.for_type(result.get("type") if cfg.extractable(result.get("type")) else None)
+        _, skills = typed.for_documents(scope.facts(sub, readable))
+        return {"cfg": typed, "classification": result, "reasons": reasons,
+                "skills_applied": [s.name for s in skills]}
 
     def has_readable(state: RunState) -> str:
-        return "extract" if any(d.status == "read" for d in state["docs"]) else "verify"
+        if not any(d.status == "read" for d in state["docs"]):
+            return "verify"
+        c = state.get("classification") or {}
+        if c.get("status") == "out_of_scope" and state["cfg"].classification.get("out_of_scope") != "extract":
+            return "verify"
+        return "extract"
 
     def extract(state: RunState) -> dict[str, Any]:
         cfg = state["cfg"]
@@ -197,7 +221,8 @@ def build_graph(store: ConfigStore, settings: Any, gateway: Gateway | None = Non
         raw = state.get("raw") or {}
         raw_records = raw.get("records") or []
         failed_model = state.get("model_error")
-        if readable and not raw_records and not failed_model:
+        skipped = (state.get("classification") or {}).get("status") == "out_of_scope" and "raw" not in state
+        if readable and not raw_records and not failed_model and not skipped:
             raw_records = [{}]            # nothing found: one empty record carries the missing fields
         records = []
         for r in raw_records:
@@ -232,13 +257,15 @@ def build_graph(store: ConfigStore, settings: Any, gateway: Gateway | None = Non
 
     g = StateGraph(RunState)
     for name, fn in (("resolve_config", resolve_config), ("ingest", ingest), ("parse_item", parse_item),
-                     ("assemble", assemble), ("extract", extract), ("verify", verify), ("route", route)):
+                     ("assemble", assemble), ("classify", classify), ("extract", extract), ("verify", verify),
+                     ("route", route)):
         g.add_node(name, _timed(name, fn))
     g.add_edge(START, "resolve_config")
     g.add_edge("resolve_config", "ingest")
     g.add_conditional_edges("ingest", dispatch, ["parse_item", "assemble"])
     g.add_edge("parse_item", "assemble")
-    g.add_conditional_edges("assemble", has_readable, {"extract": "extract", "verify": "verify"})
+    g.add_edge("assemble", "classify")
+    g.add_conditional_edges("classify", has_readable, {"extract": "extract", "verify": "verify"})
     g.add_edge("extract", "verify")
     g.add_edge("verify", "route")
     g.add_edge("route", END)
