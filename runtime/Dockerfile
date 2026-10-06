@@ -8,7 +8,7 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
     PIP_NO_CACHE_DIR=1 \
     PIP_DISABLE_PIP_VERSION_CHECK=1
 
-# tesseract: OCR for scanned PDF pages (and images, when a config turns it on)
+# tesseract: the OCR fallback when Textract is unavailable or fails a page
 # fonts-dejavu-core: the PDF writer's font (currency symbols, accents)
 RUN apt-get update \
  && apt-get install -y --no-install-recommends tesseract-ocr tesseract-ocr-eng fonts-dejavu-core \
@@ -27,13 +27,17 @@ RUN useradd --system --uid 10001 --home /app extractor \
  && chown extractor /data /audit /output
 
 # Jobs, results, review, the audit chain, the spool and checkpoints live in
-# Postgres: pass DATABASE_URL (and DB_SCHEMA, default "extractor") at run time.
+# Postgres: pass DATABASE_URL (and, for Textract, TEXTRACT_REGION or AWS_REGION plus AWS credentials
+# from the task role or environment) (and DB_SCHEMA, default "extractor") at run time.
 # Containers keep no state of their own, so API and worker containers scale out freely.
 ENV CONFIG_ROOT=/app/configs \
     INPUT_ROOT=/data \
     AUDIT_DIR=/audit \
     OUTPUT_ROOT=/output \
     OUTPUT_FORMATS=csv \
+    OCR_ENGINE=textract \
+    OCR_FALLBACK=tesseract \
+    OCR_MAX_PARALLEL=8 \
     DB_SCHEMA=extractor \
     WORKERS=2 \
     PARSE_SANDBOX=process \

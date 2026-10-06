@@ -77,7 +77,13 @@ class StubModel:
             if doc.status != "read":
                 continue
             maps = {id(t): self._column_map(t, labels) for t in doc.tables}
-            keyed = [t for t in doc.tables if (len(maps[id(t)]) >= 2 if key is None else key.name in maps[id(t)])]
+            if key is None:
+                # one record per row: the row tables are the ones that map like the widest one does;
+                # a by-currency summary that maps two columns is not a table of instructions
+                best = max((len(m) for m in maps.values()), default=0)
+                keyed = [t for t in doc.tables if len(maps[id(t)]) >= max(2, (best + 1) // 2)]
+            else:
+                keyed = [t for t in doc.tables if key.name in maps[id(t)]]
             skip = {b.locator for t in keyed for b in t.header + [x for row in t.rows for x in row]}
             cands = self._label_candidates(doc, di, labels, skip, scalars)
             for t in doc.tables:
@@ -212,7 +218,7 @@ class StubModel:
             for f in arrays:
                 mapping = item_maps[f.name]
                 items[f.name] = self._items_from_rows(doc, rows, mapping) if mapping else []
-            out.append(_Partial(order=(False, di, rows[0][0].row or 0), cands=cands, items=items,
+            out.append(_Partial(order=(False, di, doc.tables.index(table), rows[0][0].row or 0), cands=cands, items=items,
                                 key=gkey if key is None else None))
         return out
 

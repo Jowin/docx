@@ -230,7 +230,8 @@ def build_graph(store: ConfigStore, settings: Any, gateway: Gateway | None = Non
         started = float(state.get("started") or time.time())
         out = expand_mod.expand(cfg, [d for d in state["docs"] if d.status == "read"], state["sub"].items,
                                 raw_records, spool=_spool(state.get("spool_run")),
-                                deadline=started + float(cfg.limits["run_ceiling_s"]))
+                                deadline=started + float(cfg.limits["run_ceiling_s"]),
+                                sandbox_mode=settings.parse_sandbox, memory_mb=settings.sandbox_memory_mb)
         if not out["reports"]:
             return {}
         return {"expanded": out["records"], "expand_report": out["reports"],
@@ -254,8 +255,14 @@ def build_graph(store: ConfigStore, settings: Any, gateway: Gateway | None = Non
         complete = {(r["document"]) for r in state.get("expand_report") or [] if r.get("complete")}
         for d in state["docs"]:
             cut = [n for n in d.notes if n.split(":")[0] in ("rows_truncated", "pages_truncated", "sheets_truncated")]
+            if any(n.startswith(("ocr_fallback:", "ocr_unavailable:")) for r in state.get("expand_report") or []
+                   if r.get("document") == d.source for n in r.get("notes", [])):
+                run_reasons.append(f"ocr_fallback:{d.name}")
+            if d.status == "read" and any(n.startswith(("ocr_fallback:", "ocr_unavailable:")) for n in d.notes):
+                run_reasons.append(f"ocr_fallback:{d.name}")
             if d.status == "read" and cut and not (d.source in complete
-                                                   and all(n.startswith("rows_truncated") for n in cut)):
+                                                   and all(n.startswith(("rows_truncated", "pages_truncated"))
+                                                           for n in cut)):
                 run_reasons.append(f"content_truncated:{d.name}")
         if not readable and not state["sub"].ignored:
             run_reasons.append("no_readable_content")
@@ -302,19 +309,19 @@ def build_graph(store: ConfigStore, settings: Any, gateway: Gateway | None = Non
 
 
 def _with_expanded(records: list[dict[str, Any]], expanded: list[dict[str, Any]]) -> list[dict[str, Any]]:
-    """Put rows read by expand in file order among the extracted ones from the same document."""
+    """Put rows read by expand in file order (sheet, page, table, row) among the extracted ones of that document."""
     if not expanded:
         return records
 
-    def pos(rec: dict[str, Any]) -> tuple[str, int] | None:
+    def pos(rec: dict[str, Any]) -> tuple | None:
         for v in rec["fields"].values():
             doc_id, _, loc = str((v or {}).get("source") or "").partition("#")
-            m = expand_mod._parse_loc(loc)
+            m = expand_mod.parse_loc(loc)
             if doc_id and m:
-                return doc_id, m[1]
+                return (doc_id, *m[3])
         return None
 
-    extra = [{"fields": e["fields"], "reasons": dedupe(e["reasons"]), "_pos": (e["_doc"], e["_row"])}
+    extra = [{"fields": e["fields"], "reasons": dedupe(e["reasons"]), "_pos": (e["_doc"], *e["_sort"])}
              for e in expanded]
     docs_expanded = {e["_pos"][0] for e in extra}
     out: list[dict[str, Any]] = []
@@ -322,7 +329,7 @@ def _with_expanded(records: list[dict[str, Any]], expanded: list[dict[str, Any]]
     for rec in records:
         p = pos(rec)
         if p and p[0] in docs_expanded and not placed:
-            block = [dict(r, _pos=pos(r)) for r in records if (pos(r) or ("", 0))[0] in docs_expanded] + extra
+            block = [dict(r, _pos=pos(r)) for r in records if (pos(r) or ("",))[0] in docs_expanded] + extra
             block.sort(key=lambda r: r["_pos"])
             out.extend({k: v for k, v in r.items() if k != "_pos"} for r in block)
             placed = True

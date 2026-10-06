@@ -59,6 +59,13 @@ services:
       WEBHOOK_SECRET: ${WEBHOOK_SECRET:-}
       MODEL_GATEWAY_URL: ${MODEL_GATEWAY_URL:-}
       MODEL_GATEWAY_TOKEN: ${MODEL_GATEWAY_TOKEN:-}
+      # OCR: Textract with your AWS account (falls back to tesseract when unset)
+      OCR_ENGINE: ${OCR_ENGINE:-textract}
+      TEXTRACT_REGION: ${TEXTRACT_REGION:-}
+      TEXTRACT_S3_BUCKET: ${TEXTRACT_S3_BUCKET:-}
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-}
+      AWS_SESSION_TOKEN: ${AWS_SESSION_TOKEN:-}
     volumes:
       - ../runtime/configs:/configs:ro
       - ${LEARNING_DATA:-../runtime/data}:/data:ro
@@ -81,6 +88,13 @@ services:
       WEBHOOK_SECRET: ${WEBHOOK_SECRET:-}
       MODEL_GATEWAY_URL: ${MODEL_GATEWAY_URL:-}
       MODEL_GATEWAY_TOKEN: ${MODEL_GATEWAY_TOKEN:-}
+      # OCR: Textract with your AWS account (falls back to tesseract when unset)
+      OCR_ENGINE: ${OCR_ENGINE:-textract}
+      TEXTRACT_REGION: ${TEXTRACT_REGION:-}
+      TEXTRACT_S3_BUCKET: ${TEXTRACT_S3_BUCKET:-}
+      AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID:-}
+      AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY:-}
+      AWS_SESSION_TOKEN: ${AWS_SESSION_TOKEN:-}
     volumes:
       - ../runtime/configs:/configs:ro
       - ${LEARNING_DATA:-../runtime/data}:/data:ro

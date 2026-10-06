@@ -19,6 +19,17 @@ ROOT = Path(__file__).resolve().parent.parent
 INVOICE_DEFAULTS = '{"client": "default", "usecase": "invoice", "version": "1.0.0"}\n'
 
 
+@pytest.fixture(autouse=True)
+def _local_ocr(monkeypatch):
+    """Tests read scans with tesseract unless they install a Textract client themselves."""
+    monkeypatch.setenv("OCR_ENGINE", "tesseract")
+    monkeypatch.delenv("TEXTRACT_S3_BUCKET", raising=False)
+    from extractor_service import ocr
+    ocr.set_textract_client_factory(None)
+    yield
+    ocr.set_textract_client_factory(None)
+
+
 @pytest.fixture
 def input_root(tmp_path: Path) -> Path:
     data = tmp_path / "data"

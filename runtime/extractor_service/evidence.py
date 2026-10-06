@@ -208,21 +208,22 @@ def _pdf_doc(doc: Doc, data: bytes, item: Item, ev: dict[str, Any]) -> None:
                 doc.blocks.extend(blocks)
                 grid.append(blocks)
             if len(grid) >= 2:
-                doc.tables.append(Table(t["locator"], grid[0], grid[1:]))
+                doc.tables.append(Table(t["locator"], grid[0], grid[1:],
+                                        meta={"kind": "pdf", "page": page["page"]}))
     blank = list(r["pages_without_text_layer"])
     read = sorted({int(b.group[1:]) for b in doc.blocks if b.group.startswith("p") and ":" not in b.group})
     # RT-16: OCR only pages without a text layer, and record which path each page took
     ocred = []
     if blank and ev.get("ocr", True) and ocr_tool.available():
-        for p in blank:
-            try:
-                lines = ocr_tool.ocr_pdf_page(data, p, timeout_s=float(ev.get("ocr_timeout_s", 60)))
-            except Exception as exc:                          # noqa: BLE001 - an OCR failure is a note
-                doc.notes.append(f"ocr_failed:p{p}:{type(exc).__name__}")
-                continue
-            for ln in lines:
-                doc.blocks.append(Block(f"p{p}:O{ln.line}", ln.text, group=f"p{p}", row=1000 + ln.line,
-                                        confidence=ln.confidence))
+        try:
+            res = ocr_tool.ocr_pdf(data, blank, timeout_s=float(ev.get("ocr_timeout_s", 60)))
+        except ocr_tool.OcrUnavailable as exc:
+            res = ocr_tool.OcrResult({}, {p: str(exc) for p in blank}, [f"ocr_unavailable:{exc}"[:200]])
+        doc.notes.extend(res.notes)
+        for p, why in sorted(res.failed.items()):
+            doc.notes.append(f"ocr_failed:p{p}:{why}"[:200])
+        for p, page in sorted(res.pages.items()):
+            add_ocr_page(doc, p, page)
             ocred.append(p)
     for p in read:
         doc.notes.append(f"page_source:p{p}=pdf_text")
@@ -233,9 +234,28 @@ def _pdf_doc(doc: Doc, data: bytes, item: Item, ev: dict[str, Any]) -> None:
         doc.notes.append("no_text_layer:" + ",".join(f"p{p}" for p in still_blank))
     if r["window"]["has_more"]:
         doc.notes.append(f"pages_truncated:{r['page_count']}")
-    if not any(":L" in b.locator or ":O" in b.locator for b in doc.blocks):
+    if not any(":L" in b.locator or ":O" in b.locator or ":OT" in b.locator for b in doc.blocks):
         raise ToolError("no_text_layer", "PDF has no text layer on the pages read" +
                         ("" if ocr_tool.available() else " and OCR is not installed"))
+
+
+def add_ocr_page(doc: Doc, p: int, page: Any) -> None:
+    """An OCR'd page as evidence: lines ``p<n>:O<i>``, and (Textract) tables ``p<n>:OT<t>:R<r>C<c>``."""
+    for ln in page.lines:
+        doc.blocks.append(Block(f"p{p}:O{ln.line}", ln.text, group=f"p{p}", row=1000 + ln.line,
+                                confidence=ln.confidence))
+    for t, table in enumerate(page.tables, start=1):
+        grid: list[list[Block]] = []
+        for ri, row in enumerate(table.rows, start=1):
+            blocks = [Block(f"p{p}:OT{t}:R{ri}C{ci}", text.strip(), group=f"p{p}:OT{t}", row=ri, col=ci,
+                            confidence=conf)
+                      for ci, (text, conf) in enumerate(row, start=1) if text.strip()]
+            doc.blocks.extend(blocks)
+            if blocks:
+                grid.append(blocks)
+        if len(grid) >= 2:
+            doc.tables.append(Table(f"p{p}:OT{t}", grid[0], grid[1:],
+                                    meta={"kind": "pdf", "page": p, "ocr": True}))
 
 
 def _docx_doc(doc: Doc, data: bytes, item: Item, ev: dict[str, Any]) -> None:
@@ -260,9 +280,23 @@ def _docx_doc(doc: Doc, data: bytes, item: Item, ev: dict[str, Any]) -> None:
 def _image_doc(doc: Doc, data: bytes, item: Item, ev: dict[str, Any]) -> None:
     if not ocr_tool.available():
         raise ToolError("ocr_unavailable", "OCR is not installed")
-    for ln in ocr_tool.ocr_image(data, timeout_s=float(ev.get("ocr_timeout_s", 60))):
+    try:
+        page = ocr_tool.ocr_image(data, timeout_s=float(ev.get("ocr_timeout_s", 60)))
+    except ocr_tool.OcrUnavailable as exc:
+        raise ToolError("ocr_unavailable", str(exc)) from exc
+    for ln in page.lines:
         doc.blocks.append(Block(f"O{ln.line}", ln.text, group="ocr", row=ln.line, confidence=ln.confidence))
-    doc.notes.append("page_source:image=ocr")
+    for t, table in enumerate(page.tables, start=1):
+        grid = []
+        for ri, row in enumerate(table.rows, start=1):
+            blocks = [Block(f"OT{t}:R{ri}C{ci}", text.strip(), group=f"OT{t}", row=ri, col=ci, confidence=conf)
+                      for ci, (text, conf) in enumerate(row, start=1) if text.strip()]
+            doc.blocks.extend(blocks)
+            if blocks:
+                grid.append(blocks)
+        if len(grid) >= 2:
+            doc.tables.append(Table(f"OT{t}", grid[0], grid[1:], meta={"kind": "image", "ocr": True}))
+    doc.notes.append(f"page_source:image=ocr:{page.engine}")
 
 
 def _body_doc(doc: Doc, data: bytes, item: Item, ev: dict[str, Any]) -> None:

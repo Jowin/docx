@@ -233,7 +233,7 @@ document. Malformed lookup data is a config problem reported by `/health`.
 - **Attached emails** (`.eml`, `.msg`, Outlook items, and message parts) are read recursively as `embedded:<n>:<name>` sources, with their bodies and attachments. The depth is checked before recursing (`intake.max_email_depth`, default 3; RT-18, RT-36).
 - **Encrypted attachments.** PDFs, Office files and ZipCrypto zip members are opened with keys found in the email they came with: "password: …", "the pwd is …", newest message first (RT-15). Nothing is brute-forced. `metadata.keys_used` records where each working key was found (e.g. `body#L2`), never the key. With no working key the item is flagged `encrypted_no_key` and the run carries on.
 - **DOCX** paragraphs (`P12`) and tables (`T2:R3C4`). Legacy `.doc` is flagged as unsupported.
-- **OCR.** PDF pages without a text layer are rendered and read by tesseract (`p2:O3` locators). Only those pages are OCR'd, and each page notes `page_source:pN=pdf_text|ocr` (RT-16). OCR'd values are weighted by the engine's confidence. Images are OCR'd only when a config sets `intake.ocr_images: true`. Without tesseract, such pages stay flagged.
+- **OCR.** PDF pages without a text layer are rendered at 300 DPI and read by **Amazon Textract** (`AnalyzeDocument` with `TABLES`, one call per page, `OCR_MAX_PARALLEL` at a time). Textract returns lines (`p2:O3`) and tables (`p2:OT1:R4C6`), so a scanned blotter page is rows and columns, not just text. With `TEXTRACT_S3_BUCKET` set and at least `TEXTRACT_ASYNC_MIN_PAGES` (20) pages to read, the pages that need OCR are copied into a PDF of their own and sent as one asynchronous job (`StartDocumentAnalysis`), so only those pages are billed; the upload is deleted afterwards. If Textract is not configured (no region, credentials or boto3) or fails a page, **tesseract** reads it instead (`OCR_FALLBACK`, `none` to disable) and the run is flagged `ocr_fallback:<file>`; tesseract gives lines but no table structure. Only pages without a text layer are OCR'd, and each notes `page_source:pN=pdf_text|ocr` (RT-16). OCR'd values are weighted by the engine's confidence, and in a whole-file read a cell read below `evidence.ocr_min_confidence` (0.8) is flagged `low_ocr_confidence:<field>`. Images are OCR'd only when a config sets `intake.ocr_images: true`. With no engine, such pages stay flagged.
 - **Zips** are unpacked within limits (members, size, compression ratio, depth).
 
 Each item is parsed in its own LangGraph branch (`Send`), so items run in parallel,
@@ -297,8 +297,14 @@ slice of each table: the first `evidence.rows` (200) and last `evidence.tail_row
 the column each field was cited from in the extractor's answer is that field's
 column (a header equal to one of the field's labels if nothing was cited), and
 code streams every remaining row of the CSV or sheet through the same reader
-tools, building and validating one record per row. One model call covers a
-blotter of any length; a 5,000-row CSV takes under 2 s. `metadata.expanded`
+tools, building and validating one record per row. For a PDF it reads every
+page's tables 50 pages at a time, and the scanned pages' tables through
+Textract; a table that repeats the header is matched by header text, one
+without (a continuation) by position when it is as wide as the sample, and any
+other table (a summary by currency, say) is skipped (`table_not_rows`). Each
+document is read in the parsing sandbox. One model call covers a blotter of
+any length; a 5,000-row CSV takes under 2 s, and a 500-page settlement report
+(12,400 rows, 19 scanned pages) about 2 minutes. `metadata.expanded`
 shows the mapping, the constants and the row counts. `limits.max_records`
 (default 25,000) caps the records per run (`records_truncated:<n>` beyond it).
 In any use case, content that no step read in full (rows, pages or sheets past
@@ -552,7 +558,13 @@ isolation when it learns a pattern.
 | `RETENTION_DAYS` | `90` | Finished results kept this long |
 | `OUTPUT_ROOT` | `./output` (`/output` in the image) | Where result files are written; empty = none |
 | `OUTPUT_FORMATS` | `csv` | Default formats, comma-separated: `csv`, `xlsx`, `docx`, `pdf`; `none` = none |
-| `MAX_FILE_MB` | `25` | Largest input file |
+| `OCR_ENGINE` | `textract` | `textract` or `tesseract` |
+| `OCR_FALLBACK` | `tesseract` | Engine for pages the first one cannot read; `none` = none |
+| `OCR_MAX_PARALLEL` | `8` | Textract page calls in flight per document |
+| `TEXTRACT_REGION` | `AWS_REGION` | Textract's region; credentials come from the usual AWS chain (task role, env, profile) |
+| `TEXTRACT_S3_BUCKET` | unset | Enables the asynchronous path for many scanned pages |
+| `TEXTRACT_ASYNC_MIN_PAGES` | `20` | Scanned pages in one document before the asynchronous path is used |
+| `MAX_FILE_MB` | `25` | Largest input file (raise it for long scanned PDFs) |
 | `MODEL_PROVIDER` | unset | Force a provider for every config, e.g. `stub` |
 | `MODEL_GATEWAY_URL`, `MODEL_GATEWAY_TOKEN` | unset | The model gateway and its credential |
 | `MODEL_GATEWAY_AUTH_HEADER` | `Authorization` | `Authorization` sends `Bearer <token>`; any other name sends the token as is |
@@ -564,7 +576,8 @@ isolation when it learns a pattern.
 
 - **Postgres is required.** The API refuses to start without `DATABASE_URL`; `/health` reports whether the database is reachable. The batch CLI (`extractor_service.cli`) needs no database.
 - **The parser sandbox caps time and memory, not network.** Run the image without egress to complete RT-65.
-- **OCR needs tesseract**, which the image installs. English only by default; add tesseract language packs for others.
+- **Textract needs AWS access**: a region, credentials with `textract:AnalyzeDocument` (and `StartDocumentAnalysis`, `GetDocumentAnalysis`, `s3:PutObject`/`DeleteObject` on the bucket for the asynchronous path), and egress to `textract.<region>.amazonaws.com`. The tests use a stand-in client; run a few real scans through before relying on it. Synchronous calls are limited to 10 MB per page image (larger renders are re-encoded as JPEG) and by the account's TPS quota (the client retries adaptively).
+- **The tesseract fallback reads lines, not tables**, so rows on a scanned page it reads are not expanded; the run says so (`content_truncated`). English only by default.
 - **`.msg` is read with olefile (BSD) and compressed-rtf (MIT), not the GPL `extract-msg`.** The tests use synthetic files built to the published format; run a few real Outlook exports through before relying on it.
 - **The stub finds only what the aliases and skill hints name.** Real documents need a model through the gateway; design-time pattern learning adds hints for the layouts it has seen.
 - **Encrypted zips:** ZipCrypto members open with a key from the email; AES-encrypted members do not (Python's zipfile cannot read them), so they flag `encrypted_no_key`.
