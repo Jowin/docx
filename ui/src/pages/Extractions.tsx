@@ -135,6 +135,9 @@ function JobDetail({ jobId }: { jobId: string }) {
             ["Confidence", res.confidence != null ? res.confidence : "—"],
             ["Skills applied", (meta.skills_applied ?? []).join(", ") || "—"],
             ["Audit id", <span className="mono">{d.audit_id}</span>],
+            ["Transform rules", meta.transform
+              ? <span>{meta.transform.layers.map((l: any) => l.level).join(" → ")} · {meta.transform.records_changed} record(s) changed</span>
+              : <span className="muted">none</span>],
             ["Files written", (meta.outputs ?? []).length
               ? <span className="mono small">{meta.outputs.map((o: any) => o.path ?? `${o.format}: ${o.error}`).join(", ")}</span>
               : <span className="muted">none</span>],
@@ -158,7 +161,7 @@ function JobDetail({ jobId }: { jobId: string }) {
                 <div key={i} style={{ marginBottom: 14 }}>
                   <div className="row" style={{ marginBottom: 6 }}><strong>Record {i + 1}</strong><span className="muted">confidence {r.confidence}</span><Flags flags={r.flags} /></div>
                   <table>
-                    <thead><tr><th>Field</th><th>Value</th><th>Conf.</th><th>Source</th></tr></thead>
+                    <thead><tr><th>Field</th><th>Value</th><th>Conf.</th><th>Source</th><th>Rule</th></tr></thead>
                     <tbody>
                       {Object.entries(r.fields ?? {}).map(([name, f]: any) => (
                         <tr key={name}>
@@ -166,6 +169,8 @@ function JobDetail({ jobId }: { jobId: string }) {
                           <td className="mono">{f.items ? `${f.items.length} items` : f.value === null ? <span className="muted">—</span> : String(f.value)}</td>
                           <td className="num">{f.confidence ?? "—"}</td>
                           <td className="mono small muted">{f.source ?? ""}</td>
+                          <td className="small">{f.transform ? <span title={`was ${JSON.stringify(f.transform.from)}`}>
+                            <Badge tone="info">{f.transform.rule}</Badge> <span className="muted mono">{String(f.transform.from ?? "—")} →</span></span> : null}</td>
                         </tr>
                       ))}
                     </tbody>

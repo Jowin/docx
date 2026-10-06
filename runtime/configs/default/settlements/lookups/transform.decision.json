@@ -1,0 +1,209 @@
+{
+  "nodes": [
+    {
+      "id": "in",
+      "type": "inputNode",
+      "name": "Record and meta",
+      "position": {
+        "x": 0,
+        "y": 120
+      }
+    },
+    {
+      "id": "norm",
+      "type": "expressionNode",
+      "name": "Normalise",
+      "position": {
+        "x": 220,
+        "y": 120
+      },
+      "content": {
+        "expressions": [
+          {
+            "id": "x1",
+            "key": "record.currency",
+            "value": "record.currency != null ? upper(trim(record.currency)) : null"
+          },
+          {
+            "id": "x2",
+            "key": "record.transaction_type",
+            "value": "record.transaction_type != null ? upper(trim(record.transaction_type)) : null"
+          }
+        ],
+        "passThrough": true,
+        "inputField": null,
+        "outputPath": null,
+        "executionMode": "single"
+      }
+    },
+    {
+      "id": "syn",
+      "type": "decisionTableNode",
+      "name": "Transaction type synonyms",
+      "position": {
+        "x": 440,
+        "y": 120
+      },
+      "content": {
+        "hitPolicy": "first",
+        "inputs": [
+          {
+            "id": "in0",
+            "name": "Transaction type",
+            "field": "record.transaction_type"
+          }
+        ],
+        "outputs": [
+          {
+            "id": "out0",
+            "name": "Transaction type",
+            "field": "record.transaction_type"
+          }
+        ],
+        "rules": [
+          {
+            "_id": "r0",
+            "_description": "buy",
+            "in0": "\"PURCHASE\", \"BOUGHT\", \"B\"",
+            "out0": "\"BUY\""
+          },
+          {
+            "_id": "r1",
+            "_description": "sell",
+            "in0": "\"SALE\", \"SOLD\", \"S\"",
+            "out0": "\"SELL\""
+          },
+          {
+            "_id": "r2",
+            "_description": "dvp",
+            "in0": "\"DELIVERY VS PAYMENT\", \"DELIVER VS PAYMENT\", \"DELIVERY VERSUS PAYMENT\"",
+            "out0": "\"DVP\""
+          },
+          {
+            "_id": "r3",
+            "_description": "rvp",
+            "in0": "\"RECEIVE VS PAYMENT\", \"RECEIPT VS PAYMENT\", \"RECEIVE VERSUS PAYMENT\"",
+            "out0": "\"RVP\""
+          },
+          {
+            "_id": "r4",
+            "_description": "cash in",
+            "in0": "\"CASH RECEIPT\", \"DEPOSIT\", \"CASH CREDIT\"",
+            "out0": "\"CASH IN\""
+          },
+          {
+            "_id": "r5",
+            "_description": "cash out",
+            "in0": "\"CASH PAYMENT\", \"WITHDRAWAL\", \"CASH DEBIT\"",
+            "out0": "\"CASH OUT\""
+          }
+        ],
+        "passThrough": true,
+        "inputField": null,
+        "outputPath": null,
+        "executionMode": "single"
+      }
+    },
+    {
+      "id": "acc",
+      "type": "decisionNode",
+      "name": "Portfolio lookup",
+      "position": {
+        "x": 660,
+        "y": 120
+      },
+      "content": {
+        "key": "tables/portfolio_accounts.json",
+        "passThrough": true,
+        "inputField": null,
+        "outputPath": null,
+        "executionMode": "single"
+      }
+    },
+    {
+      "id": "pc",
+      "type": "decisionNode",
+      "name": "Purpose code lookup",
+      "position": {
+        "x": 880,
+        "y": 120
+      },
+      "content": {
+        "key": "tables/purpose_codes.json",
+        "passThrough": true,
+        "inputField": null,
+        "outputPath": null,
+        "executionMode": "single"
+      }
+    },
+    {
+      "id": "chk",
+      "type": "expressionNode",
+      "name": "Checks",
+      "position": {
+        "x": 1100,
+        "y": 120
+      },
+      "content": {
+        "expressions": [
+          {
+            "id": "c1",
+            "key": "flags",
+            "value": "record.settlement_date != null and record.trade_date != null and date(record.settlement_date) < date(record.trade_date) ? ['settles_before_trade'] : []"
+          }
+        ],
+        "passThrough": true,
+        "inputField": null,
+        "outputPath": null,
+        "executionMode": "single"
+      }
+    },
+    {
+      "id": "out",
+      "type": "outputNode",
+      "name": "Record and flags",
+      "position": {
+        "x": 1320,
+        "y": 120
+      }
+    }
+  ],
+  "edges": [
+    {
+      "id": "in-norm",
+      "sourceId": "in",
+      "targetId": "norm",
+      "type": "edge"
+    },
+    {
+      "id": "norm-syn",
+      "sourceId": "norm",
+      "targetId": "syn",
+      "type": "edge"
+    },
+    {
+      "id": "syn-acc",
+      "sourceId": "syn",
+      "targetId": "acc",
+      "type": "edge"
+    },
+    {
+      "id": "acc-pc",
+      "sourceId": "acc",
+      "targetId": "pc",
+      "type": "edge"
+    },
+    {
+      "id": "pc-chk",
+      "sourceId": "pc",
+      "targetId": "chk",
+      "type": "edge"
+    },
+    {
+      "id": "chk-out",
+      "sourceId": "chk",
+      "targetId": "out",
+      "type": "edge"
+    }
+  ]
+}

@@ -19,11 +19,13 @@ export default function Lookups({ who }: { who: string }) {
 
   return (
     <>
-      <h1>Ingestion lookups</h1>
+      <h1>Lookups</h1>
       <p className="lede">Before anything is parsed, every attachment is checked against these lists: the use case's,
         then the client's, then the global ones. The most specific level with a verdict wins, so a use case can keep
         what the global list ignores. Lookups live beside the version folders, so a change applies at once without a
-        new config version.</p>
+        new config version. Each level can also hold ZEN transform rules (<span className="mono">transform.decision.json</span>
+        and its <span className="mono">tables/</span>), run over every extracted record after the version's own rules,
+        global first and use case last.</p>
       <div className="card row">
         <label className="field" style={{ minWidth: 320 }}>Scope
           <select value={target} onChange={(e) => setTarget(e.target.value)}>
@@ -64,8 +66,14 @@ function Level({ level, client, usecase, who, onSaved }: { level: any; client?: 
     <div className="card form">
       <div className="card-head"><h2 style={{ margin: 0 }}>{title}</h2>
         {level.ingestion ? <Badge tone="ok">set</Badge> : <Badge>empty</Badge>}
-        {level.decision ? <Badge tone="info" title="ingestion.decision.json: a ZEN decision table">decision</Badge> : null}</div>
+        {level.decision ? <Badge tone="info" title="ingestion.decision.json: a ZEN decision table">decision</Badge> : null}
+        {level.transform?.entry ? <Badge tone="info" title="transform.decision.json: ZEN rules run over every record">transform</Badge> : null}</div>
       <div className="muted small mono">{level.path}</div>
+      {level.transform?.entry ? (
+        <div className="note small">Transform rules: <span className="mono">transform.decision.json</span>
+          {level.transform.tables.length ? <> calling {level.transform.tables.map((t: string) => <span key={t} className="mono"> {t}</span>)}</> : null}.
+          Edit them in the ZEN editor and commit the files; the runtime checks them when it loads the config.</div>
+      ) : null}
       {KEYS.map(([k, label, ph]) => (
         <label className="field" key={k}>{label}
           <textarea rows={k.includes("names") ? 4 : 2} value={form[k] ?? ""} placeholder={ph}

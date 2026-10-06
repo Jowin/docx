@@ -1,0 +1,87 @@
+{
+  "nodes": [
+    {
+      "id": "in",
+      "type": "inputNode",
+      "name": "Record",
+      "position": {
+        "x": 0,
+        "y": 120
+      }
+    },
+    {
+      "id": "t",
+      "type": "decisionTableNode",
+      "name": "Cash purpose code by transaction type",
+      "position": {
+        "x": 260,
+        "y": 120
+      },
+      "content": {
+        "hitPolicy": "first",
+        "inputs": [
+          {
+            "id": "in0",
+            "name": "Purpose code",
+            "field": "record.cash_purpose_code"
+          },
+          {
+            "id": "in1",
+            "name": "Transaction type",
+            "field": "record.transaction_type"
+          }
+        ],
+        "outputs": [
+          {
+            "id": "out0",
+            "name": "Purpose code",
+            "field": "record.cash_purpose_code"
+          }
+        ],
+        "rules": [
+          {
+            "_id": "r0",
+            "_description": "securities settlement",
+            "in0": "null",
+            "in1": "\"BUY\", \"SELL\", \"DVP\", \"RVP\"",
+            "out0": "\"SECU\""
+          },
+          {
+            "_id": "r1",
+            "_description": "cash movement",
+            "in0": "null",
+            "in1": "\"CASH IN\", \"CASH OUT\"",
+            "out0": "\"CASH\""
+          }
+        ],
+        "passThrough": true,
+        "inputField": null,
+        "outputPath": null,
+        "executionMode": "single"
+      }
+    },
+    {
+      "id": "out",
+      "type": "outputNode",
+      "name": "Record",
+      "position": {
+        "x": 560,
+        "y": 120
+      }
+    }
+  ],
+  "edges": [
+    {
+      "id": "in-t",
+      "sourceId": "in",
+      "targetId": "t",
+      "type": "edge"
+    },
+    {
+      "id": "t-out",
+      "sourceId": "t",
+      "targetId": "out",
+      "type": "edge"
+    }
+  ]
+}

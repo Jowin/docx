@@ -258,8 +258,12 @@ def get_lookups(client: str | None = None, usecase: str | None = None, settings:
         level, folder = _lookup_folder(root, c, u)
         path = folder / "ingestion.json"
         data = json.loads(path.read_text(encoding="utf-8")) if path.is_file() else None
+        tables = sorted(p.relative_to(folder).as_posix() for p in (folder / "tables").rglob("*.json")) \
+            if (folder / "tables").is_dir() else []
         levels.append({"level": level, "path": str(folder), "ingestion": data,
-                       "decision": (folder / "ingestion.decision.json").is_file()})
+                       "decision": (folder / "ingestion.decision.json").is_file(),
+                       # ZEN rules for deterministic transformation and lookup (runtime transform.py)
+                       "transform": {"entry": (folder / "transform.decision.json").is_file(), "tables": tables}})
     return {"client": client, "usecase": usecase, "levels": levels}
 
 

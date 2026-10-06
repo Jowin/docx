@@ -39,6 +39,7 @@ from fastapi import FastAPI, Request
 from fastapi.concurrency import run_in_threadpool
 from fastapi.responses import JSONResponse, PlainTextResponse, Response
 
+from . import transform as transform_mod
 from . import pipeline
 from .config_store import ConfigStore
 from . import config_store as config_store_mod
@@ -376,7 +377,8 @@ def create_app(settings: pipeline.Settings | None = None, model_gateway: Gateway
                                   "threshold": r["threshold"], "negative_signals": r["negatives"]}
                               for t, r in (cfg.detection or {}).get("types", {}).items()} or None,
                 "ingestion_filter": {"active": cfg.ingestion_filter.active,
-                                     "layers": cfg.ingestion_filter.describe()}}
+                                     "layers": cfg.ingestion_filter.describe()},
+                "transform": transform_mod.describe(cfg)}
 
     @app.get("/lookups")
     def lookups(client: str | None = None, usecase: str | None = None) -> dict[str, Any]:
@@ -387,7 +389,8 @@ def create_app(settings: pipeline.Settings | None = None, model_gateway: Gateway
                 config_store_mod._check_segment(kind, value)
         f = IngestionFilter.load(settings.config_root, client, usecase)
         return {"client": client, "usecase": usecase,
-                "levels": [{"level": lvl, "path": str(path), "exists": path.is_dir()}
+                "levels": [{"level": lvl, "path": str(path), "exists": path.is_dir(),
+                            "transform": (path / "transform.decision.json").is_file()}
                            for lvl, path in folders(settings.config_root, client, usecase)],
                 "layers": f.describe()}
 

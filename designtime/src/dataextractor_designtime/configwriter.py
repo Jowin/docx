@@ -9,6 +9,7 @@ byte the folder that is published and, once released, served::
     schema.json              the first type's dictionary
     schemas/<type>.json      every other type's dictionary
     rules/detection.json     the detection rules, as CTR-08 writes them
+    rules/transform.decision.json, rules/tables/   ZEN transform rules, carried over from the base
     prompts/system.md        from the base version (or the template config)
     skills/<name>.md         base skills, learned patterns carried over, authored overrides
 
@@ -163,8 +164,15 @@ def write_version(dst: Path, *, client: str, usecase: str, schemas: dict[str, Fi
             spec["thresholds"] = {"accept_at": tt.accept_at}
         types[t] = spec
 
+    # transform rules (ZEN) are logic released with the version: a redesign keeps them
+    if same and (base / "rules" / "transform.decision.json").is_file():
+        (dst / "rules").mkdir(exist_ok=True)
+        shutil.copy2(base / "rules" / "transform.decision.json", dst / "rules" / "transform.decision.json")
+        if (base / "rules" / "tables").is_dir():
+            shutil.copytree(base / "rules" / "tables", dst / "rules" / "tables")
+
     if detection is not None and detection.types:
-        (dst / "rules").mkdir()
+        (dst / "rules").mkdir(exist_ok=True)
         (dst / "rules" / "detection.json").write_text(json.dumps(detection.to_dict(), indent=2, default=str) + "\n",
                                                      encoding="utf-8")
 

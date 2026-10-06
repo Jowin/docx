@@ -214,6 +214,7 @@ def _result(settings: Settings, state: dict[str, Any], file_location: str, t0: f
             "skipped": sub.skipped,
             "classification": _classification(state.get("classification")),
             **({"expanded": state["expand_report"]} if state.get("expand_report") else {}),
+            **({"transform": state["transform_report"]} if state.get("transform_report") else {}),
             "skills_applied": state.get("skills_applied") or [],
             "keys_used": sub.keys_used,
             "record_count": len(records),

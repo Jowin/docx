@@ -1,0 +1,80 @@
+{
+  "nodes": [
+    {
+      "id": "in",
+      "type": "inputNode",
+      "name": "Record",
+      "position": {
+        "x": 0,
+        "y": 120
+      }
+    },
+    {
+      "id": "t",
+      "type": "decisionTableNode",
+      "name": "Custody account to portfolio",
+      "position": {
+        "x": 260,
+        "y": 120
+      },
+      "content": {
+        "hitPolicy": "first",
+        "inputs": [
+          {
+            "id": "in0",
+            "name": "Portfolio or account",
+            "field": "record.portfolio"
+          }
+        ],
+        "outputs": [
+          {
+            "id": "out0",
+            "name": "Portfolio",
+            "field": "record.portfolio"
+          }
+        ],
+        "rules": [
+          {
+            "_id": "r0",
+            "_description": "example: global equity custody account",
+            "in0": "\"ACC-100234\", \"100234\"",
+            "out0": "\"GLB-EQ-01\""
+          },
+          {
+            "_id": "r1",
+            "_description": "example: global fixed income custody account",
+            "in0": "\"ACC-200871\", \"200871\"",
+            "out0": "\"GLB-FI-02\""
+          }
+        ],
+        "passThrough": true,
+        "inputField": null,
+        "outputPath": null,
+        "executionMode": "single"
+      }
+    },
+    {
+      "id": "out",
+      "type": "outputNode",
+      "name": "Record",
+      "position": {
+        "x": 560,
+        "y": 120
+      }
+    }
+  ],
+  "edges": [
+    {
+      "id": "in-t",
+      "sourceId": "in",
+      "targetId": "t",
+      "type": "edge"
+    },
+    {
+      "id": "t-out",
+      "sourceId": "t",
+      "targetId": "out",
+      "type": "edge"
+    }
+  ]
+}

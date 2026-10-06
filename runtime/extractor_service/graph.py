@@ -2,7 +2,7 @@
 
     START -> resolve_config -> ingest --(one Send per item)--> parse_item (parallel, sandboxed)
                                      \\-(no items)-----------\\
-          -> assemble -> classify -> (readable and in scope?) extract -> expand -> verify -> route -> END
+          -> assemble -> classify -> (readable and in scope?) extract -> expand -> verify -> transform -> route -> END
                                     \\------------------------------------^
 
 * ``ingest`` opens the input, applies the ingestion filter, unpacks emails
@@ -21,7 +21,9 @@
   dictionary's records are rows: the extractor's citations give the column
   mapping, code streams the file.
 * ``verify`` grounds every value and flags content no step read in full
-  (``content_truncated``); ``route`` turns reasons into flags.
+  (``content_truncated``); ``transform`` (transform.py) runs the ZEN rules
+  for deterministic transformation and lookup over every record; ``route``
+  turns reasons into flags.
 
 Nodes record their duration and the path the run took (``metadata.graph``).
 With a checkpointer, every node boundary is a checkpoint, so a run interrupted
@@ -39,6 +41,7 @@ from langgraph.types import Send
 
 from . import classify as classify_mod
 from . import expand as expand_mod
+from . import transform as transform_mod
 from . import gateway as gateway_mod
 from . import sandbox, scope
 from .config_store import ConfigStore, ExtractionConfig
@@ -77,6 +80,7 @@ class RunState(TypedDict, total=False):
     classification: dict[str, Any]
     expanded: list[dict[str, Any]]       # records read straight from the file by expand
     expand_report: list[dict[str, Any]]
+    transform_report: dict[str, Any] | None   # what the transform rules changed
     reasons: list[str]
     raw: dict[str, Any]
     model_call: dict[str, Any]
@@ -272,6 +276,11 @@ def build_graph(store: ConfigStore, settings: Any, gateway: Gateway | None = Non
             run_reasons.append("unplaced_content")
         return {"records": records, "reasons": run_reasons}
 
+    def transform(state: RunState) -> dict[str, Any]:
+        """Deterministic transformation and lookup (ZEN rules) over every record; see transform.py."""
+        records, report = transform_mod.apply(state["cfg"], state["records"], state["sub"], state["docs"])
+        return {"records": records, "transform_report": report} if report else {}
+
     def route(state: RunState) -> dict[str, Any]:
         """Flag Router (RT-43): every applicable flag, in rule order; nothing is dropped."""
         cfg = state["cfg"]
@@ -293,7 +302,7 @@ def build_graph(store: ConfigStore, settings: Any, gateway: Gateway | None = Non
     g = StateGraph(RunState)
     for name, fn in (("resolve_config", resolve_config), ("ingest", ingest), ("parse_item", parse_item),
                      ("assemble", assemble), ("classify", classify), ("extract", extract), ("expand", expand),
-                     ("verify", verify), ("route", route)):
+                     ("verify", verify), ("transform", transform), ("route", route)):
         g.add_node(name, _timed(name, fn))
     g.add_edge(START, "resolve_config")
     g.add_edge("resolve_config", "ingest")
@@ -303,7 +312,8 @@ def build_graph(store: ConfigStore, settings: Any, gateway: Gateway | None = Non
     g.add_conditional_edges("classify", has_readable, {"extract": "extract", "verify": "verify"})
     g.add_edge("extract", "expand")
     g.add_edge("expand", "verify")
-    g.add_edge("verify", "route")
+    g.add_edge("verify", "transform")
+    g.add_edge("transform", "route")
     g.add_edge("route", END)
     return g.compile(checkpointer=checkpointer)
 

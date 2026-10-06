@@ -196,8 +196,9 @@ class ExtractionConfig:
         t = self.types.get(email_type or "") or self.types[self.default_type]
         out = dataclasses.replace(self, email_type=t.name, dictionary=t.dictionary,
                                   base_dictionary=t.base_dictionary, skills=t.skills, type_accept_at=t.accept_at)
-        if "_ingestion_filter" in self.__dict__:
-            object.__setattr__(out, "_ingestion_filter", self.__dict__["_ingestion_filter"])
+        for key in ("_ingestion_filter", "_transform_layers"):
+            if key in self.__dict__:
+                object.__setattr__(out, key, self.__dict__[key])
         return out
 
     def for_documents(self, facts: dict[str, Any]) -> tuple[DataDictionary, tuple[Skill, ...]]:
@@ -426,8 +427,9 @@ class ConfigStore:
     @staticmethod
     def _copy(cfg: ExtractionConfig, **changes: Any) -> ExtractionConfig:
         out = dataclasses.replace(cfg, **changes)
-        if "_ingestion_filter" in cfg.__dict__:
-            object.__setattr__(out, "_ingestion_filter", cfg.__dict__["_ingestion_filter"])
+        for key in ("_ingestion_filter", "_transform_layers"):
+            if key in cfg.__dict__:
+                object.__setattr__(out, key, cfg.__dict__[key])
         return out
 
     # ---------------------------------------------------------- loading
@@ -508,6 +510,8 @@ class ConfigStore:
                                skills=skills, resolved_by=dict(by), base_dictionary=base_dictionary,
                                root=self.root, types=types, detection=detection, type_accept_at=accept)
         cfg.ingestion_filter                      # load and validate lookup data now, not mid-run
+        from . import transform
+        transform.layers(cfg)                     # and the transform rules (refused at load, not per record)
         with self._lock:
             self._cache[key] = cfg
         return cfg

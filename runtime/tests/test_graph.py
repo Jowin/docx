@@ -4,13 +4,13 @@ import zipfile
 
 from tests.samples import logo_png
 
-FULL = ["resolve_config", "ingest", "parse_item", "assemble", "extract", "verify", "route"]
+FULL = ["resolve_config", "ingest", "parse_item", "assemble", "extract", "verify", "transform", "route"]
 
 
 def test_normal_run_visits_every_node(client):
     m = client.post("/extract", json={"file_location": "invoice.pdf", "extended": True}).json()["metadata"]
     assert m["graph"]["path"] == ["resolve_config", "ingest", "parse_item:invoice.pdf", "assemble", "classify",
-                                  "extract", "expand", "verify", "route"]
+                                  "extract", "expand", "verify", "transform", "route"]
     assert set(m["timings_ms"]) == set(m["graph"]["path"])
 
 
@@ -28,7 +28,7 @@ def test_nothing_readable_skips_the_model(client, input_root):
         z.writestr("photo.png", logo_png())
     (input_root / "photos.zip").write_bytes(buf.getvalue())
     e = client.post("/extract", json={"file_location": "photos.zip", "extended": True}).json()
-    assert e["metadata"]["graph"]["path"] == ["resolve_config", "ingest", "assemble", "classify", "verify", "route"]
+    assert e["metadata"]["graph"]["path"] == ["resolve_config", "ingest", "assemble", "classify", "verify", "transform", "route"]
     assert e["flagged"] is True and "no_readable_content" in e["flags"]
     assert e["data"] == [] and e["records"] == []           # nothing to read: no records
 

@@ -227,6 +227,66 @@ A decision that errors keeps the item
 and flags `ingestion_rule_error`, so a broken rule never silently drops a
 document. Malformed lookup data is a config problem reported by `/health`.
 
+## Transform rules: deterministic transformation and lookup
+
+After `verify`, every record (including every row `expand` read) goes through
+ZEN rules: decisions in JDM, the format the GoRules ZEN editor exports. They
+normalise values ("purchase" -> `BUY`), look values up (custody account ->
+portfolio), derive missing ones (purpose code from the transaction type) and
+raise flags, with no model call: the same record and rules give the same
+output.
+
+Rules sit in four places and run in this order, each seeing the one before:
+
+| Level | Files | Changes with |
+| --- | --- | --- |
+| version | `<version>/rules/transform.decision.json`, `rules/tables/**` | a new version (sign-off, release, rollback) |
+| global | `lookups/transform.decision.json`, `lookups/tables/**` | the file, at once |
+| client | `<client>/lookups/...` | the file, at once |
+| use case | `<client>/<usecase>/lookups/...` | the file, at once |
+
+Put logic in the version and reference data (mapping tables) in the lookup
+levels; the use case level runs last and has the final word. The entry
+decision can call any decision under its `tables/` with a decision node
+(`"key": "tables/portfolio_accounts.json"`), so a mapping table is maintained on
+its own.
+
+The entry decision gets `{"record": {<field>: <value>}, "meta": {client,
+usecase, email_type, sender, sender_domain, subject, input, document, index}}`
+and returns the same shape (pass-through nodes keep what a rule does not set):
+
+- `record.<field>` = a new value. It is normalised and validated like an
+  extracted one (`schema_validation_failed:<field>` if it breaks the field's
+  type or pattern; a rule that repairs a value clears that flag). The field
+  keeps its source and gains `"transform": {"rule": "<level>", "from": <old>}`;
+  a field filled from nothing is `grounding: "derived"`, with the confidence of
+  the weakest value in the record. Required fields are re-checked.
+- `flags` = a string or list: each becomes a record flag `rule:<flag>`, sending
+  the record to review without changing it.
+
+A record a level fails on keeps its values and is flagged
+`transform_rule_error:<level>`; nothing is dropped. Only deterministic nodes
+are accepted (input, output, decision table, expression, switch, decision); a
+function node (JavaScript), a custom node, a call to a missing table or an
+expression that reads the clock (`now`) is refused when the config loads
+(`error:config_invalid`, and `/health` lists it). Records go through the
+engine in one batch: 3,000 rows take well under a second.
+`metadata.transform` lists the levels, how many records changed and which
+fields; `GET /configs/{client}/{usecase}` and `GET /lookups` show where the
+rules are.
+
+The settlements use case ships use-case-level rules in
+`configs/default/settlements/lookups/`: upper-case currency and transaction
+type, transaction type synonyms (`PURCHASE`/`BOUGHT` -> `BUY`, `CASH PAYMENT`
+-> `CASH OUT`, ...), an example custody account -> portfolio table, the cash
+purpose code from the transaction type when none is stated (`SECU` for
+securities, `CASH` for cash movements), and the flag `rule:settles_before_trade`.
+
+The rules tool is also served on its own: `POST /tools/rules` with
+`{"decision": <JDM>, "tables": {"tables/x.json": <JDM>}, "context": {...} |
+"contexts": [...], "trace": true}` (from `extractor_tools.api`), for trying a
+rule set before committing it.
+
 ## What gets read
 
 - **Email threads.** The body is split into messages, newest first (RT-12): reply and forward markers, Outlook header blocks, `On … wrote:` lines and quoted runs. Each body line records its `segment`, and older messages count for less, so a corrected figure in the latest reply beats the quoted original.
@@ -256,7 +316,7 @@ the run (RT-35, RT-51).
 ```
 START -> resolve_config -> ingest --(one Send per item)--> parse_item (parallel, sandboxed)
                                  \--(no items)----------------\
-      -> assemble -> classify -> (readable and in scope?) extract -> expand -> verify -> route -> END
+      -> assemble -> classify -> (readable and in scope?) extract -> expand -> verify -> transform -> route -> END
 ```
 
 | Node | Does |
@@ -269,6 +329,7 @@ START -> resolve_config -> ingest --(one Send per item)--> parse_item (parallel,
 | `extract` | The stub or the model through the gateway; run and cost ceilings; a model failure becomes a flag |
 | `expand` | Row-per-record dictionaries: reads every table row the extractor did not answer for, using the columns its answer cited |
 | `verify` | Grounds every value in the evidence, validates types, scores confidence; flags `content_truncated` |
+| `transform` | Deterministic transformation and lookup: the ZEN rules of the version and the lookup levels, over every record |
 | `route` | Flags per record and for the run, in rule order, all of them (RT-43) |
 
 `metadata.graph` and `metadata.timings_ms` hold the path and each node's time

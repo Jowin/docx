@@ -16,6 +16,7 @@ from fastapi.responses import JSONResponse, Response
 from .common import ToolError
 from .csv_reader import read_csv
 from .pdf_text import extract_pdf_text
+from .rules import evaluate as evaluate_rules
 from .spreadsheet_reader import list_sheets, read_sheet
 from .writers import write
 
@@ -128,6 +129,35 @@ async def docx_writer(request: Request) -> Response:
 async def pdf_writer(request: Request) -> Response:
     """An extraction result as a PDF report."""
     return await _write(request, "pdf")
+
+
+# ------------------------------------------------------------------ rules (ZEN)
+
+MAX_RULE_INPUTS = 10_000
+
+
+@router.post("/rules")
+async def rules(request: Request) -> JSONResponse:
+    """Evaluate a ZEN decision (and the lookup tables it calls) over one input or many.
+
+    Body: {"decision": <JDM>, "tables": {"tables/x.json": <JDM>, ...},
+           "context": {...} | "contexts": [{...}, ...], "trace": false}
+    """
+    try:
+        body = await request.json()
+    except ValueError:
+        return JSONResponse(ToolError("param_invalid", "body must be JSON").to_dict(), status_code=422)
+    if not isinstance(body, dict) or "decision" not in body:
+        return JSONResponse(ToolError("param_invalid", 'body needs "decision"').to_dict(), status_code=422)
+    contexts = body.get("contexts")
+    if contexts is not None and (not isinstance(contexts, list) or len(contexts) > MAX_RULE_INPUTS):
+        return JSONResponse(ToolError("param_invalid", f"contexts must be a list of at most {MAX_RULE_INPUTS}")
+                            .to_dict(), status_code=422)
+    try:
+        return JSONResponse(evaluate_rules(body["decision"], body.get("context"), contexts=contexts,
+                                           tables=body.get("tables"), trace=bool(body.get("trace"))))
+    except ToolError as exc:
+        return JSONResponse(exc.to_dict(), status_code=422)
 
 
 app = FastAPI(title="DataExtractor tools")

@@ -104,3 +104,26 @@ def test_authoring_run_is_a_langgraph_graph():
     assert nodes[1:-1] == ["intake", "profile", "discover_types", "confirm_types", "field_schemas",
                            "detection_rules", "author_skills", "build_config", "evaluate_bootstrap",
                            "tune_thresholds", "evaluate_final", "publish"]
+
+
+def test_a_new_version_keeps_the_base_versions_transform_rules(tmp_path):
+    """ZEN transform rules are logic released with a version; an authored redesign carries them."""
+    import json as _json
+
+    from dataextractor_designtime.configwriter import write_version
+    from dataextractor_designtime.contracts.artifacts import FieldDef, FieldSchema as _FS
+    base = tmp_path / "acme" / "inv" / "1.0.0"
+    (base / "rules" / "tables").mkdir(parents=True)
+    (base / "prompts").mkdir()
+    (base / "prompts" / "system.md").write_text("prompt")
+    (base / "manifest.json").write_text(_json.dumps({"client": "acme", "usecase": "inv", "version": "1.0.0"}))
+    (base / "rules" / "transform.decision.json").write_text('{"nodes": [], "edges": []}')
+    (base / "rules" / "tables" / "ccy.json").write_text('{"nodes": [], "edges": []}')
+    schema = _FS(email_type="invoice", generated_by="x", required_fields=[FieldDef(name="amount", type="decimal")])
+    dst = write_version(tmp_path / "acme" / "inv" / "1.1.0", client="acme", usecase="inv",
+                        schemas={"invoice": schema}, detection=None, thresholds=None, base=base)
+    assert (dst / "rules" / "transform.decision.json").read_text() == '{"nodes": [], "edges": []}'
+    assert (dst / "rules" / "tables" / "ccy.json").is_file()
+    other = write_version(tmp_path / "other" / "inv" / "1.0.0", client="other", usecase="inv",
+                          schemas={"invoice": schema}, detection=None, thresholds=None, base=base)
+    assert not (other / "rules").exists()          # a template lends settings, not another client's rules
